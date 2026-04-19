@@ -793,13 +793,12 @@ const closeInput = () => {
 // ── AI 气泡：建议回复 ──────────────────────────────────────────
 const getAiReplyKey = (tabId, msgIndex) => `${tabId}:${msgIndex}`;
 
-const askHowToReply = async (msg, msgIndex) => {
-  const tabId = activeChatTabId.value;
-  const key = getAiReplyKey(tabId, msgIndex);
+const askHowToReply = async (msg, key) => {
   if (aiReplyMap.value[key]?.loading) return;
 
   aiReplyMap.value[key] = { loading: true, text: '' };
 
+  const tabId = activeChatTabId.value;
   const tab = chatTabs.value.find(t => t.id === tabId);
   const contextMessages = tab ? tab.messages.slice(-8) : [];
 
@@ -812,6 +811,12 @@ const askHowToReply = async (msg, msgIndex) => {
   );
 
   aiReplyMap.value[key].loading = false;
+};
+
+const closeAiReply = (key) => {
+  delete aiReplyMap.value[key];
+  // 触发响应式更新
+  aiReplyMap.value = { ...aiReplyMap.value };
 };
 
 // ── AI 底栏对话助手 ────────────────────────────────────────────
@@ -1154,50 +1159,63 @@ const openTutorial = async () => {
           class="message-group"
           :class="{ 'self-msg': msg.sender === (settings.account || 'Me') }"
         >
-          <div class="message-meta">
-            <span class="msg-sender">{{ msg.sender }}</span>
-            <span class="msg-time">{{ msg.time }}</span>
-          </div>
-          <div class="message-bubble group">
-            <div class="source-text">{{ msg.text }}</div>
-            <div class="translate-text" v-if="msg.translated && msg.translated.trim() !== msg.text.trim()">{{ msg.translated }}</div>
-            <!-- 气泡操作行 -->
-            <div class="bubble-actions">
-              <button class="bubble-action-btn" @click="copyContent(msg.text)" :title="i18n.copyOriginal">
-                <Copy :size="11" />
-              </button>
-              <button class="bubble-action-btn" v-if="msg.translated && msg.translated !== msg.text" @click="copyContent(msg.translated)" :title="i18n.copyTranslation">
-                <MessageSquareDot :size="11" />
-              </button>
-              <button
-                class="bubble-action-btn"
-                v-if="msg.sender !== (settings.account || 'Me')"
-                @click="askHowToReply(msg, i)"
-                :title="i18n.suggestReply"
-                :class="{ 'loading': aiReplyMap[`${activeChatTabId}:${i}`]?.loading }"
-              >
-                <Sparkles :size="11" />
-              </button>
+          <!-- 用全量数组中的真实索引作为 key，防止分页后索引漂移 -->
+          <template v-if="true">
+            <div class="message-meta">
+              <span class="msg-sender">{{ msg.sender }}</span>
+              <span class="msg-time">{{ msg.time }}</span>
             </div>
-          </div>
-          <!-- AI 建议回复展开区 -->
-          <div
-            v-if="aiReplyMap[`${activeChatTabId}:${i}`]"
-            class="ai-reply-box"
-          >
-            <div class="ai-reply-content">
-              <span v-if="aiReplyMap[`${activeChatTabId}:${i}`].loading" class="ai-thinking">✨ 思考中…</span>
-              <span v-else>{{ aiReplyMap[`${activeChatTabId}:${i}`].text }}</span>
+            <div class="message-bubble group">
+              <div class="source-text">{{ msg.text }}</div>
+              <div class="translate-text" v-if="msg.translated && msg.translated.trim() !== msg.text.trim()">{{ msg.translated }}</div>
+              <!-- 气泡操作行 -->
+              <div class="bubble-actions">
+                <button class="bubble-action-btn" @click="copyContent(msg.text)" :title="i18n.copyOriginal">
+                  <Copy :size="11" />
+                </button>
+                <button class="bubble-action-btn" v-if="msg.translated && msg.translated !== msg.text" @click="copyContent(msg.translated)" :title="i18n.copyTranslation">
+                  <MessageSquareDot :size="11" />
+                </button>
+                <button
+                  class="bubble-action-btn"
+                  v-if="msg.sender !== (settings.account || 'Me')"
+                  @click="askHowToReply(msg, getAiReplyKey(activeChatTabId, msg.time + msg.sender))"
+                  :title="i18n.suggestReply"
+                  :class="{ 'loading': aiReplyMap[getAiReplyKey(activeChatTabId, msg.time + msg.sender)]?.loading }"
+                >
+                  <Sparkles :size="11" />
+                </button>
+              </div>
             </div>
-            <button
-              v-if="!aiReplyMap[`${activeChatTabId}:${i}`].loading && aiReplyMap[`${activeChatTabId}:${i}`].text"
-              class="bubble-action-btn"
-              @click="copyContent(aiReplyMap[`${activeChatTabId}:${i}`].text)"
-              :title="i18n.copyResult"
+            <!-- AI 建议回复展开区 -->
+            <div
+              v-if="aiReplyMap[getAiReplyKey(activeChatTabId, msg.time + msg.sender)]"
+              class="ai-reply-box"
             >
-              <Copy :size="11" />
-            </button>
-          </div>
+              <div class="ai-reply-content">
+                <span v-if="aiReplyMap[getAiReplyKey(activeChatTabId, msg.time + msg.sender)].loading" class="ai-thinking">✨ 思考中…</span>
+                <span v-else>{{ aiReplyMap[getAiReplyKey(activeChatTabId, msg.time + msg.sender)].text }}</span>
+              </div>
+              <div style="display:flex;gap:4px;">
+                <button
+                  v-if="!aiReplyMap[getAiReplyKey(activeChatTabId, msg.time + msg.sender)].loading && aiReplyMap[getAiReplyKey(activeChatTabId, msg.time + msg.sender)].text"
+                  class="bubble-action-btn"
+                  @click="copyContent(aiReplyMap[getAiReplyKey(activeChatTabId, msg.time + msg.sender)].text)"
+                  :title="i18n.copyResult"
+                >
+                  <Copy :size="11" />
+                </button>
+                <button
+                  v-if="!aiReplyMap[getAiReplyKey(activeChatTabId, msg.time + msg.sender)].loading"
+                  class="bubble-action-btn danger"
+                  @click="closeAiReply(getAiReplyKey(activeChatTabId, msg.time + msg.sender))"
+                  title="关闭"
+                >
+                  <X :size="11" />
+                </button>
+              </div>
+            </div>
+          </template>
         </div>
       </div>
 
