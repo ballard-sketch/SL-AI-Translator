@@ -279,7 +279,8 @@ const switchTab = (tabId) => {
   activeChatTabId.value = tabId;
   const tab = chatTabs.value.find(t => t.id === tabId);
   if (tab) tab.hasUnread = false;
-  scrollToBottom();
+  // 切换 Tab 时强制滚到底部
+  scrollToBottom(false, true);
 };
 
 const getHistoryContext = (tabId) => {
@@ -491,7 +492,8 @@ onMounted(async () => {
     const reactiveItem = tabInfo.messages[tabInfo.messages.length - 1];
     
     persistState();
-    if (activeChatTabId.value === source) scrollToBottom(true);
+    // 仅当用户本来就在底部时才自动跟随新消息
+    if (activeChatTabId.value === source) scrollToBottom(true, false);
 
     // 自己发的、黑名单用户或频道：渲染上屏但不翻译
     const isBlacklisted = settings.value.blacklist.some(
@@ -537,8 +539,8 @@ onMounted(async () => {
       targetLang: settings.value.recvLang,
     });
 
-    // 翻译完成后滚到底部（无论翻译时用户是否滚动过）
-    if (activeChatTabId.value === source) scrollToBottom(true);
+    // 翻译完成后若用户仍在底部则跟随滚动
+    if (activeChatTabId.value === source) scrollToBottom(true, false);
 
     // 公屏频道不存档，仅私聊保存
     const PUBLIC_CHAT_FILES = ['chat.txt', 'conversation.log'];
@@ -575,7 +577,8 @@ onMounted(async () => {
 
 watch([activeTab, isListening], ([newTab, newListening]) => {
   if (newTab === TAB_CHAT && newListening) {
-    scrollToBottom();
+    // 切回聊天页强制滚底
+    scrollToBottom(false, true);
   }
 });
 
@@ -834,9 +837,17 @@ const sendAiChat = async () => {
 };
 
 // ── 工具 ──────────────────────────────────────────────────────────
-const scrollToBottom = (smooth = false) => {
+// 判断聊天区是否已经接近底部（距底 <=100px 视为在底部）
+const isNearBottom = () => {
+  const el = chatScrollRef.value;
+  if (!el) return true;
+  return el.scrollHeight - el.scrollTop - el.clientHeight <= 100;
+};
+
+// force=true 时无论位置都滚底（切换 Tab、首次加载等场景）
+const scrollToBottom = (smooth = false, force = false) => {
   nextTick(() => {
-    if (chatScrollRef.value) {
+    if (chatScrollRef.value && (force || isNearBottom())) {
       if (smooth) {
         chatScrollRef.value.scrollTo({ top: chatScrollRef.value.scrollHeight, behavior: 'smooth' });
       } else {
