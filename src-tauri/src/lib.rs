@@ -219,6 +219,30 @@ fn show_main_window(app: AppHandle) {
     }
 }
 
+/// 注册全局快捷键（唤出窗口并聚焦输入框）；传空串表示关闭快捷键
+#[tauri::command]
+fn set_global_shortcut(app: AppHandle, accelerator: String) -> Result<(), String> {
+    use tauri_plugin_global_shortcut::GlobalShortcutExt;
+
+    let gs = app.global_shortcut();
+    gs.unregister_all().map_err(|e| e.to_string())?;
+    let accelerator = accelerator.trim();
+    if accelerator.is_empty() {
+        return Ok(());
+    }
+    gs.register(accelerator).map_err(|e| e.to_string())
+}
+
+/// 快捷键按下：从最小化 / 托盘状态唤出主窗口，再通知前端聚焦输入框
+fn summon_main_window(app: &AppHandle) {
+    if let Some(win) = app.get_webview_window("main") {
+        let _ = win.unminimize();
+        let _ = win.show();
+        let _ = win.set_focus();
+    }
+    let _ = app.emit(constants::EVENT_SHORTCUT_TRIGGER, ());
+}
+
 // ── 构建系统托盘 ─────────────────────────────────────────────────────
 
 fn build_tray(app: &tauri::App) -> tauri::Result<()> {
@@ -272,7 +296,7 @@ pub fn run() {
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(|app_handle, _shortcut, event| {
                     if event.state() == ShortcutState::Pressed {
-                        let _ = app_handle.emit(constants::EVENT_SHORTCUT_TRIGGER, ());
+                        summon_main_window(app_handle);
                     }
                 })
                 .build(),
@@ -290,6 +314,7 @@ pub fn run() {
             get_viewer_log_dir,
             list_accounts,
             show_main_window,
+            set_global_shortcut,
             toggle_topmost,
             append_translation_history,
             open_history_folder,
@@ -300,4 +325,18 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use tauri_plugin_global_shortcut::Shortcut;
+
+    /// 前端录制出来的写法必须能被解析
+    #[test]
+    fn recorder_accelerators_parse() {
+        for acc in ["Ctrl+Alt+T", "Alt+Backquote", "F9", "Ctrl+Shift+1", "Alt+Space", "Super+Shift+Slash"] {
+            assert!(acc.parse::<Shortcut>().is_ok(), "{acc} should parse");
+        }
+        assert!("Ctrl+".parse::<Shortcut>().is_err());
+    }
 }

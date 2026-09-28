@@ -66,6 +66,8 @@ const settings = ref({
   keywordBlocklist: [],          // 关键词屏蔽数组（含此词不翻译）
   sendTone: 'natural',           // 新频道默认语气
   backTranslate: true,           // 发送翻译时附带回译
+  glossary: [],                  // 术语表：每行 "词" 或 "A = B"
+  hotkey: 'Ctrl+Alt+T',          // 全局快捷键，空串 = 关闭
 });
 const accountList = ref([]);
 const errorMessage = ref('');
@@ -132,6 +134,15 @@ const I18N_BUNDLES = {
     defaultToneLabel: "新频道的默认语气",
     tone_natural: "自然", tone_casual: "随意", tone_friendly: "友好", tone_polite: "礼貌",
     tone_flirty: "调情", tone_rp: "角色扮演", tone_brief: "简短",
+    glossaryLabel: "术语表（人名、地名等固定译法，收发两个方向都生效）",
+    glossaryPlc: "每行一条：\nCinna = 辛娜      固定互译\nka2s               保持原样不翻译",
+    hotkeyLabel: "全局快捷键（唤出窗口并聚焦输入框）",
+    hotkeyPlc: "点击后按下组合键",
+    hotkeyRecording: "请按下组合键…（Esc 取消）",
+    hotkeyClear: "关闭快捷键",
+    hotkeyNeedModifier: "需要包含 Ctrl / Alt / Shift 之一（F1-F12 除外）",
+    hotkeyFail: "快捷键注册失败，可能已被其他程序占用：",
+    hotkeyOff: "未设置",
   },
   'en-US': {
     appTitle: "AI.SLtalk", listeningInfo: "Active", startListening: "Start Translator",
@@ -191,6 +202,15 @@ const I18N_BUNDLES = {
     defaultToneLabel: "Default tone for new channels",
     tone_natural: "Natural", tone_casual: "Casual", tone_friendly: "Friendly", tone_polite: "Polite",
     tone_flirty: "Flirty", tone_rp: "Roleplay", tone_brief: "Brief",
+    glossaryLabel: "Glossary (fixed renderings for names and places, applied both ways)",
+    glossaryPlc: "One entry per line:\nCinna = 辛娜      fixed in both directions\nka2s               keep as is, never translate",
+    hotkeyLabel: "Global hotkey (bring up the window and focus the input)",
+    hotkeyPlc: "Click, then press a key combination",
+    hotkeyRecording: "Press a key combination... (Esc to cancel)",
+    hotkeyClear: "Disable hotkey",
+    hotkeyNeedModifier: "Must include Ctrl, Alt or Shift (except F1-F12)",
+    hotkeyFail: "Could not register the hotkey; another program may be using it: ",
+    hotkeyOff: "Not set",
   }
 };
 
@@ -437,6 +457,69 @@ const keywordBlocklistRaw = computed({
   get: () => settings.value.keywordBlocklist.join('\n'),
   set: (v) => { settings.value.keywordBlocklist = v.split('\n'); }
 });
+const glossaryRaw = computed({
+  get: () => settings.value.glossary.join('\n'),
+  set: (v) => { settings.value.glossary = v.split('\n'); }
+});
+
+// 所有大模型请求共用的配置
+const llmConfig = (extra = {}) => ({
+  apiKey:   settings.value.apiKey,
+  baseUrl:  settings.value.baseUrl,
+  model:    settings.value.model,
+  glossary: settings.value.glossary,
+  ...extra,
+});
+
+// ── 全局快捷键 ────────────────────────────────────────────────
+const hotkeyRecording = ref(false);
+const hotkeyError = ref('');
+
+const applyHotkey = async () => {
+  hotkeyError.value = '';
+  try {
+    await invoke('set_global_shortcut', { accelerator: settings.value.hotkey || '' });
+  } catch (e) {
+    hotkeyError.value = i18n.value.hotkeyFail + e;
+  }
+};
+
+// KeyboardEvent.code -> global-hotkey 认识的按键名
+const hotkeyKeyName = (code) => {
+  if (/^Key[A-Z]$/.test(code)) return code.slice(3);
+  if (/^Digit\d$/.test(code)) return code.slice(5);
+  return code;
+};
+const MODIFIER_CODES = ['ControlLeft', 'ControlRight', 'AltLeft', 'AltRight', 'ShiftLeft', 'ShiftRight', 'MetaLeft', 'MetaRight'];
+
+const recordHotkey = (e) => {
+  if (!hotkeyRecording.value) return;
+  e.preventDefault();
+  e.stopPropagation();
+  if (e.code === 'Escape') { hotkeyRecording.value = false; return; }
+  if (MODIFIER_CODES.includes(e.code)) return; // 等主键
+  const mods = [];
+  if (e.ctrlKey) mods.push('Ctrl');
+  if (e.altKey) mods.push('Alt');
+  if (e.shiftKey) mods.push('Shift');
+  if (e.metaKey) mods.push('Super');
+  const isFn = /^F([1-9]|1[0-2])$/.test(e.code);
+  if (!mods.length && !isFn) {
+    hotkeyError.value = i18n.value.hotkeyNeedModifier;
+    return;
+  }
+  settings.value.hotkey = [...mods, hotkeyKeyName(e.code)].join('+');
+  hotkeyRecording.value = false;
+  saveSettings();
+  applyHotkey();
+};
+
+const clearHotkey = () => {
+  settings.value.hotkey = '';
+  hotkeyRecording.value = false;
+  saveSettings();
+  applyHotkey();
+};
 
 const toggleBlacklist = (targetId) => {
   if (isTargetBlacklisted(targetId)) {
@@ -475,12 +558,7 @@ const translateMessage = async (tab, msg) => {
     msg.text,
     getHistoryContext(tab, msg),
     (chunk) => { msg.translated += chunk; },
-    {
-      apiKey:     settings.value.apiKey,
-      baseUrl:    settings.value.baseUrl,
-      model:      settings.value.model,
-      targetLang: settings.value.recvLang,
-    },
+    llmConfig({ targetLang: settings.value.recvLang }),
     { signal: controller.signal }
   );
   finishRequest(key, controller);
@@ -547,6 +625,7 @@ onMounted(async () => {
 
   // 启动时应用已保存的界面语言
   await applyUiLang();
+  await applyHotkey();
 
   // 如果没有保存的路径，自动解析 %APPDATA%\Firestorm_x64 的真实路径
   if (!settings.value.logDir) {
@@ -687,7 +766,9 @@ onMounted(async () => {
   });
 
   // 侦听全局快捷键
+  // 窗口已由 Rust 端唤出，这里负责回到聊天页并聚焦输入框
   await TauriBridge.onShortcutTrigger(async () => {
+    if (activeTab.value === TAB_SETTINGS && !hotkeyRecording.value) activeTab.value = TAB_CHAT;
     await nextTick();
     composerRef.value?.focus();
   });
@@ -719,7 +800,7 @@ const GLOBAL_SETTINGS_KEY = 'sl-translator-global';
 // 账号级设置键（黑名单、接收语言等随账号变化）
 const accountSettingsKey = (account) => `sl-settings-${account}`;
 // 全局字段清单
-const GLOBAL_FIELDS = ['logDir', 'account', 'apiKey', 'baseUrl', 'model', 'uiLang', 'contextCount', 'translateGroup', 'viewerType', 'bgOpacity', 'nearbyWhitelistEnabled', 'sendTone', 'backTranslate'];
+const GLOBAL_FIELDS = ['logDir', 'account', 'apiKey', 'baseUrl', 'model', 'uiLang', 'contextCount', 'translateGroup', 'viewerType', 'bgOpacity', 'nearbyWhitelistEnabled', 'sendTone', 'backTranslate', 'hotkey'];
 
 const saveSettings = () => {
   const global = {};
@@ -733,6 +814,7 @@ const saveSettings = () => {
       blacklist:          settings.value.blacklist,
       nearbyWhitelist:    settings.value.nearbyWhitelist,
       keywordBlocklist:   settings.value.keywordBlocklist,
+      glossary:           settings.value.glossary,
     };
     localStorage.setItem(accountSettingsKey(settings.value.account), JSON.stringify(perAccount));
   }
@@ -750,11 +832,13 @@ const loadAccountSettings = () => {
       settings.value.blacklist          = parsed.blacklist          ?? [];
       settings.value.nearbyWhitelist    = parsed.nearbyWhitelist    ?? [];
       settings.value.keywordBlocklist   = parsed.keywordBlocklist   ?? [];
+      settings.value.glossary           = parsed.glossary           ?? [];
     } else {
       // 新账号：重置账号级字段为默认值
       settings.value.blacklist        = [];
       settings.value.nearbyWhitelist  = [];
       settings.value.keywordBlocklist = [];
+      settings.value.glossary         = [];
     }
   } catch (_) {}
 };
@@ -811,12 +895,8 @@ const testApiConnection = async () => {
   testApiMessage.value = i18n.value.testApiConnecting;
   saveSettings();
 
-  const res = await LLMService.translateIncoming('Hello, nice to meet you', [], () => {}, {
-    apiKey:     settings.value.apiKey,
-    baseUrl:    settings.value.baseUrl,
-    model:      settings.value.model,
-    targetLang: settings.value.recvLang || 'English'
-  });
+  const res = await LLMService.translateIncoming('Hello, nice to meet you', [], () => {},
+    llmConfig({ targetLang: settings.value.recvLang || 'English', glossary: [] }));
 
   if (!res.ok) {
     testApiStatus.value = 'error';
@@ -901,7 +981,7 @@ const runTranslate = async (text) => {
       composer.value.translation = translation;
       composer.value.back = back;
     },
-    { apiKey: settings.value.apiKey, baseUrl: settings.value.baseUrl, model: settings.value.model },
+    llmConfig(),
     { signal: controller.signal }
   );
   finishRequest('composer', controller);
@@ -938,7 +1018,7 @@ const runAsk = async (prompt) => {
     prompt,
     tab ? tab.messages.slice(-8) : [],
     (chunk) => { if (!controller.signal.aborted) aiChat.value.result += chunk; },
-    { apiKey: settings.value.apiKey, baseUrl: settings.value.baseUrl, model: settings.value.model },
+    llmConfig(),
     { signal: controller.signal }
   );
   finishRequest('ask', controller);
@@ -990,7 +1070,7 @@ const askHowToReply = async (msg) => {
       box.suggestions = suggestions;
       box.raw = raw;
     },
-    { apiKey: settings.value.apiKey, baseUrl: settings.value.baseUrl, model: settings.value.model },
+    llmConfig(),
     { signal: controller.signal }
   );
   finishRequest(`reply:${key}`, controller);
@@ -1230,6 +1310,14 @@ const openTutorial = async () => {
                 </div>
               </div>
               <div class="form-section">
+                <label class="form-label">{{ i18n.glossaryLabel }}</label>
+                <textarea class="form-input"
+                  style="resize:vertical;min-height:65px;font-size:12px;line-height:1.5;"
+                  v-model="glossaryRaw"
+                  :placeholder="i18n.glossaryPlc"
+                />
+              </div>
+              <div class="form-section">
                 <label class="form-label" style="text-transform:none;letter-spacing:0;font-weight:500;">
                   <input type="checkbox" v-model="settings.backTranslate" style="vertical-align:middle;margin-right:5px;" />
                   {{ i18n.backTranslateCb }}
@@ -1290,6 +1378,23 @@ const openTutorial = async () => {
                 </label>
                 <input type="range" v-model.number="settings.bgOpacity" min="0" max="1" step="0.05"
                   style="width:100%;accent-color:var(--accent);cursor:pointer;" />
+              </div>
+              <div class="form-section">
+                <label class="form-label">{{ i18n.hotkeyLabel }}</label>
+                <div class="input-row">
+                  <input
+                    class="form-input hotkey-input"
+                    :class="{ recording: hotkeyRecording }"
+                    readonly
+                    :value="hotkeyRecording ? i18n.hotkeyRecording : (settings.hotkey || i18n.hotkeyOff)"
+                    :placeholder="i18n.hotkeyPlc"
+                    @click="hotkeyRecording = true; hotkeyError = ''"
+                    @blur="hotkeyRecording = false"
+                    @keydown="recordHotkey"
+                  />
+                  <button class="btn-browse" :title="i18n.hotkeyClear" @click="clearHotkey"><X :size="12" /></button>
+                </div>
+                <div v-if="hotkeyError" class="form-hint" style="color:#ef4444;">{{ hotkeyError }}</div>
               </div>
               <div class="form-section" style="margin-bottom:0">
                 <label class="form-label">{{ i18n.uiLangLabel }}</label>

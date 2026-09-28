@@ -245,6 +245,9 @@ html, body, #app {
   color: var(--text-muted); pointer-events: none;
 }
 
+.hotkey-input { cursor: pointer; font-family: ui-monospace, Consolas, monospace; }
+.hotkey-input.recording { border-color: var(--accent); color: #c7d2fe; }
+
 .form-hint { font-size: 11px; color: var(--text-muted); margin-top: 4px; padding-left: 2px; }
 
 .btn-save {

@@ -30,11 +30,42 @@ export class LLMService {
     }
 
     /**
+     * 术语表：只挑出 text 里实际出现的词条，拼成提示词片段
+     * 每行一条："词" = 保持原样不翻译；"A = B" = A 固定译为 B，反过来 B 也固定译为 A
+     * @param {string} text
+     * @param {string[]} glossary
+     */
+    static _glossaryBlock(text, glossary = []) {
+        const lower = (text || '').toLowerCase();
+        const keep = [];
+        const rules = [];
+        for (const raw of glossary) {
+            const line = (raw || '').trim();
+            if (!line || line.startsWith('#')) continue;
+            const eq = line.indexOf('=');
+            if (eq === -1) {
+                if (lower.includes(line.toLowerCase())) keep.push(line);
+                continue;
+            }
+            const a = line.slice(0, eq).trim();
+            const b = line.slice(eq + 1).trim();
+            if (!a || !b) continue;
+            if (lower.includes(a.toLowerCase())) rules.push(`"${a}" -> "${b}"`);
+            else if (lower.includes(b.toLowerCase())) rules.push(`"${b}" -> "${a}"`);
+        }
+        if (!keep.length && !rules.length) return '';
+        let block = '\n\nGlossary (always follow):';
+        if (keep.length) block += `\nKeep exactly as written, do not translate: ${keep.map(k => `"${k}"`).join(', ')}`;
+        if (rules.length) block += `\nAlways render these terms this way: ${rules.join('; ')}`;
+        return block;
+    }
+
+    /**
      * 翻译对方发来的消息
      * @param {string} text
      * @param {Array<{sender:string,text:string}>} history - 同频道上文
      * @param {Function} onChunk
-     * @param {Object} config - { apiKey, baseUrl, model, targetLang }
+     * @param {Object} config - { apiKey, baseUrl, model, targetLang, glossary }
      * @param {Object} opts - { signal }
      */
     static async translateIncoming(text, history, onChunk, config, opts = {}) {
@@ -48,7 +79,7 @@ Understand SL slang and abbreviations (TP, LM, sim, rez, IM, L$, AFK, brb, ty, n
 Keep the sender's tone: casual stays casual, roleplay stays roleplay, emotes stay emotes.
 Keep line breaks. Keep names, URLs and SLURLs unchanged.
 If the message is already in ${targetLang}, output it unchanged.
-Output only the translation, no notes, no quotes.${context}`;
+Output only the translation, no notes, no quotes.${LLMService._glossaryBlock(text, config.glossary)}${context}`;
 
         return LLMService._doStream(
             [{ role: 'system', content: system }, { role: 'user', content: text }],
@@ -66,7 +97,7 @@ Output only the translation, no notes, no quotes.${context}`;
      *   myLang:        回译用的语言（我的母语）
      *   withBack:      是否输出回译
      * @param {Function} onUpdate - ({ translation, back }) => {}，每次收到字符都会以当前累计全文回调
-     * @param {Object} config - { apiKey, baseUrl, model }
+     * @param {Object} config - { apiKey, baseUrl, model, glossary }
      * @param {Object} opts - { signal }
      */
     static async translateOutgoing(text, params, onUpdate, config, opts = {}) {
@@ -88,7 +119,7 @@ Tone: ${TONE_GUIDE[tone] || TONE_GUIDE.natural}
 Convey the intent and feeling, not the literal words. Use the idioms, sentence length and punctuation a native speaker would use in online chat. Avoid stiff, translated-sounding phrasing.
 Keep names, URLs, SLURLs and emoticons as they are. Keep the user's line breaks.
 Do not add greetings, facts or questions the user did not express.
-Output only the message itself, no quotes, no explanations.${others}${backRule}`;
+Output only the message itself, no quotes, no explanations.${LLMService._glossaryBlock(text, config.glossary)}${others}${backRule}`;
 
         let full = '';
         const result = await LLMService._doStream(
@@ -130,7 +161,7 @@ Suggest 2 or 3 different replies to the message from ${targetMsg.sender}, writte
 Tone: ${TONE_GUIDE[tone] || TONE_GUIDE.natural}
 Each reply must sound like a native speaker typing in chat and be ready to paste as is.
 Output one suggestion per line in exactly this format, nothing else:
-<reply> ||| <meaning of the reply in ${myLang}>
+<reply> ||| <meaning of the reply in ${myLang}>${LLMService._glossaryBlock(`${context}\n${targetMsg.text}`, config.glossary)}
 
 Recent conversation:
 ${context}`;
