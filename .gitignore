@@ -24,4 +24,5 @@ dist-ssr
 *.sw?
 
 docs
-docs/release_guide_private.md
+docs/release_guide_private.md
+__pycache__/
