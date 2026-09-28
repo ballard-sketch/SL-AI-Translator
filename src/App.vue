@@ -1,23 +1,29 @@
 <script setup>
-import { ref, watch, onMounted, nextTick, computed } from 'vue';
+import { ref, watch, onMounted, onBeforeUnmount, nextTick, computed } from 'vue';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { invoke } from '@tauri-apps/api/core';
 import { openUrl } from '@tauri-apps/plugin-opener';
 import { saveWindowState, restoreStateCurrent } from '@tauri-apps/plugin-window-state';
 import { TauriBridge } from './services/TauriBridge';
-import { LLMService } from './services/LLMService';
+import { LLMService, TONES } from './services/LLMService';
 import { UpdateService } from './services/UpdateService';
 import { API_DEFAULTS } from './utils/constants';
 import {
   Sparkles, Activity, Play, Minus, X,
   Settings, MessageSquareDot, Send, KeyRound,
   FolderOpen, User, ChevronDown, Pin, PinOff, BookText,
-  Bell, BellOff, Copy, HelpCircle
+  Bell, BellOff, Copy, HelpCircle, RotateCw, Languages, Bot
 } from 'lucide-vue-next';
 
 // ── 常量 ──────────────────────────────────────────────────────────
 const TAB_CHAT = 'chat';
 const TAB_SETTINGS = 'settings';
+const PUBLIC_CHAT_FILES = ['chat.txt', 'conversation.log'];
+// SL 单条聊天消息上限（字节）
+const SL_MSG_BYTE_LIMIT = 1023;
+// 发送方向可选的目标语言，'auto' = 按对方最近消息自动判断
+const SEND_LANGS = ['auto', 'English', 'Simplified Chinese', 'Traditional Chinese', 'Japanese', 'Korean',
+  'Spanish', 'Portuguese', 'French', 'German', 'Italian', 'Russian', 'Turkish', 'Dutch', 'Polish'];
 
 // ── 窗口控制 ──────────────────────────────────────────────────────
 const win = getCurrentWindow();
@@ -58,9 +64,12 @@ const settings = ref({
   nearbyWhitelistEnabled: false, // 附近频道白名单开关
   nearbyWhitelist: [],           // 白名单用户名数组（附近频道）
   keywordBlocklist: [],          // 关键词屏蔽数组（含此词不翻译）
+  sendTone: 'natural',           // 新频道默认语气
+  backTranslate: true,           // 发送翻译时附带回译
 });
 const accountList = ref([]);
 const errorMessage = ref('');
+const apiKeyBarDismissed = ref(false);
 
 // ── 内置语言包 ────────────────────────────────────────────────────
 const I18N_BUNDLES = {
@@ -74,25 +83,23 @@ const I18N_BUNDLES = {
     recvLangConfig: "将其发来的消息，翻译为：",
     ctxCountSetting: "翻译参考上文的条数（默认 5 条，填 0 关闭）",
     groupCb: "开启群聊同步及翻译 (带有 group 字样的频道)", uiLangLabel: "软件界面语言",
-    saveBtn: "💾 保存设置", apiKeyFloatTip: "填写 API Key 才能翻译：",
-    inputPlc: "输入你的母语...回车翻译为对方语言并复制到剪贴板",
+    saveBtn: "保存设置", apiKeyFloatTip: "填写 API Key 才能翻译：",
     nearbyTab: "附近", tutorialTitle: "使用教程", stopListeningTitle: "停止翻译引擎",
     testApiBtn: "测试 API", testApiTesting: "测试中...",
     testApiNoKey: "请先填写 API Key",
     testApiConnecting: "正在连接 API...",
-    testApiSuccess: "✅ 测试通过！API 连接正常。",
-    testApiFail: "❌ 测试失败：无法获取响应流，请检查 Base URL。",
+    testApiSuccess: "测试通过，API 连接正常。",
+    testApiFail: "测试失败：没有收到响应，请检查 Base URL 和模型名。",
     muteChanTip: "免打扰 (停止翻译此频道)",
-    sendBtnTip: "翻译并复制",
-    mutedOverlay: "已对该频道静音（不再翻译），您可以点击上方 Tab 中的钓铃图标取消静音。",
+    mutedOverlay: "已对该频道静音（不再翻译），点击上方 Tab 中的铃铛图标可取消静音。",
     engineStartFail: "引擎启动失败: ",
     settingsIncomplete: "请先填写正确的日志目录，并在下拉框中选择你的 SL 账号！\n如果下拉列表为空，请检查日志目录是否正确。",
     pinTitle: "全局置顶", unpinTitle: "取消置顶",
     minimizeTitle: "最小化", closeTitle: "关闭",
     updateAvailable: "发现新版本：v{v}", updateBtn: "前往下载",
     copyOriginal: "复制原文", copyTranslation: "复制译文", suggestReply: "AI 建议回复",
-    aiChatPlc: "让 AI 帮你翻译、润色、建议回复…", aiChatSend: "发送",
-    copyResult: "复制结果", clearResult: "清除",
+    retranslate: "重新翻译",
+    copyResult: "复制", clearResult: "清除", closeLabel: "关闭", copied: "已复制",
     refreshAccounts: "刷新账号列表",
     viewerLabel: "客户端",
     viewerFirestorm: "Firestorm Viewer",
@@ -108,6 +115,23 @@ const I18N_BUNDLES = {
     secTranslation: "翻译参数",
     secFilter: "过滤规则",
     secAppearance: "界面外观",
+    // 底部输入栏
+    modeTranslate: "翻译", modeAsk: "问 AI",
+    composerPlc: "输入你想说的话，回车译成对方语言并复制；Shift+回车换行",
+    askPlc: "问 AI：解释、润色、分析上下文…",
+    toneLabel: "语气", sendLangLabel: "译成",
+    langAuto: "自动（跟随对方）",
+    backLabel: "意思",
+    regenerate: "换一种说法",
+    thinking: "生成中…",
+    overLimit: "超出 SL 单条上限（{n}/{max} 字节），发送时会被截断",
+    errNoKey: "请先在设置中填写 API Key",
+    errTimeout: "请求超时（30 秒无响应）",
+    errPrefix: "请求失败：",
+    backTranslateCb: "翻译我的话时附带回译（显示译文的大意，方便核对）",
+    defaultToneLabel: "新频道的默认语气",
+    tone_natural: "自然", tone_casual: "随意", tone_friendly: "友好", tone_polite: "礼貌",
+    tone_flirty: "调情", tone_rp: "角色扮演", tone_brief: "简短",
   },
   'en-US': {
     appTitle: "AI.SLtalk", listeningInfo: "Active", startListening: "Start Translator",
@@ -119,25 +143,23 @@ const I18N_BUNDLES = {
     recvLangConfig: "Translate incoming messages to:",
     ctxCountSetting: "Context lines for translation (0 = disabled):",
     groupCb: "Enable group chat translation (files containing 'group')", uiLangLabel: "UI Language",
-    saveBtn: "💾 Save Settings", apiKeyFloatTip: "Enter API Key to enable translation:",
-    inputPlc: "Type in your language...Enter to translate & copy to clipboard",
+    saveBtn: "Save Settings", apiKeyFloatTip: "Enter API Key to enable translation:",
     nearbyTab: "Nearby", tutorialTitle: "Tutorial", stopListeningTitle: "Stop Translator Engine",
     testApiBtn: "Test API", testApiTesting: "Testing...",
     testApiNoKey: "Please fill in the API Key first",
     testApiConnecting: "Connecting to API...",
-    testApiSuccess: "✅ Test passed! API connection is working.",
-    testApiFail: "❌ Test failed: no response stream received. Please check the Base URL.",
+    testApiSuccess: "Test passed. API connection is working.",
+    testApiFail: "Test failed: no response received. Check the Base URL and model name.",
     muteChanTip: "Mute (stop translating this channel)",
-    sendBtnTip: "Translate and copy",
     mutedOverlay: "This channel is muted. Click the bell icon above to unmute.",
     engineStartFail: "Engine failed to start: ",
     settingsIncomplete: "Please set the log directory and select your SL account first.\nIf the dropdown is empty, check that the log directory path is correct.",
     pinTitle: "Always on Top", unpinTitle: "Unpin",
     minimizeTitle: "Minimize", closeTitle: "Close",
     updateAvailable: "New version available: v{v}", updateBtn: "Download",
-    copyOriginal: "Copy original", copyTranslation: "Copy translation", suggestReply: "AI suggest reply",
-    aiChatPlc: "Ask AI to translate, polish, suggest a reply...", aiChatSend: "Send",
-    copyResult: "Copy result", clearResult: "Clear",
+    copyOriginal: "Copy original", copyTranslation: "Copy translation", suggestReply: "Suggest replies",
+    retranslate: "Translate again",
+    copyResult: "Copy", clearResult: "Clear", closeLabel: "Close", copied: "Copied",
     refreshAccounts: "Refresh account list",
     viewerLabel: "Viewer",
     viewerFirestorm: "Firestorm Viewer",
@@ -153,6 +175,22 @@ const I18N_BUNDLES = {
     secTranslation: "Translation",
     secFilter: "Filters",
     secAppearance: "Appearance",
+    modeTranslate: "Translate", modeAsk: "Ask AI",
+    composerPlc: "Type what you want to say. Enter translates and copies; Shift+Enter for a new line",
+    askPlc: "Ask AI: explain, polish, read the context...",
+    toneLabel: "Tone", sendLangLabel: "To",
+    langAuto: "Auto (match them)",
+    backLabel: "Means",
+    regenerate: "Rephrase",
+    thinking: "Generating...",
+    overLimit: "Over the SL message limit ({n}/{max} bytes); it will be cut off",
+    errNoKey: "Set your API Key in Settings first",
+    errTimeout: "Request timed out (no response for 30 s)",
+    errPrefix: "Request failed: ",
+    backTranslateCb: "Show a back-translation of my outgoing messages to check the meaning",
+    defaultToneLabel: "Default tone for new channels",
+    tone_natural: "Natural", tone_casual: "Casual", tone_friendly: "Friendly", tone_polite: "Polite",
+    tone_flirty: "Flirty", tone_rp: "Roleplay", tone_brief: "Brief",
   }
 };
 
@@ -163,6 +201,8 @@ const updateInfo = ref(null);
 const applyUiLang = async () => {
   const lang = settings.value.uiLang;
   if (lang === 'custom') {
+    // 自定义语言包可能是旧版本导出的，先用中文补齐缺失的新键
+    Object.assign(i18n.value, I18N_BUNDLES['zh-CN']);
     try {
       const custom = await invoke('load_custom_i18n');
       if (custom) Object.assign(i18n.value, JSON.parse(custom));
@@ -173,20 +213,49 @@ const applyUiLang = async () => {
   }
 };
 
+// 把 LLMService 返回的失败结果转成界面文案；取消的请求返回空串
+const describeError = (res) => {
+  if (res.aborted) return '';
+  if (res.error === 'NO_API_KEY') return i18n.value.errNoKey;
+  if (res.timedOut) return i18n.value.errTimeout;
+  return i18n.value.errPrefix + res.error;
+};
+
 // 只要有路径和账号就能开监听，apiKey 可以后填
 const settingsValid = computed(() =>
   Boolean(settings.value.logDir) &&
   Boolean(settings.value.account)
 );
 
+// ── 进行中的请求：统一登记，关闭/清除时可取消 ──────────────────
+const inflight = new Map();
+const startRequest = (key) => {
+  inflight.get(key)?.abort();
+  const controller = new AbortController();
+  inflight.set(key, controller);
+  return controller;
+};
+const finishRequest = (key, controller) => {
+  if (inflight.get(key) === controller) inflight.delete(key);
+};
+const cancelRequest = (key) => {
+  inflight.get(key)?.abort();
+  inflight.delete(key);
+};
 
 // ── 聊天状态 ──────────────────────────────────────────────────────
+let msgSeq = 0;
+const newMsgId = () => `${Date.now().toString(36)}-${(msgSeq++).toString(36)}`;
+// 旧存档里的消息没有 id，退回到 time+sender
+const msgKey = (msg) => msg.id || `${msg.time}|${msg.sender}`;
+
 const chatTabs = ref([
   {
     id: 'chat.txt',
     title: 'nearby',
     messages: [
       {
+        id: newMsgId(),
         time: new Date().toLocaleTimeString(),
         sender: 'System',
         text: 'AI SLtalk translation core initialized.',
@@ -200,8 +269,10 @@ const activeChatTabId = ref('chat.txt');
 const tabRenderLimits = ref({});
 const CHAT_RENDER_LIMIT = 20;
 
+const activeChatTab = computed(() => chatTabs.value.find(t => t.id === activeChatTabId.value));
+
 const activeTabMessages = computed(() => {
-  const tab = chatTabs.value.find(t => t.id === activeChatTabId.value);
+  const tab = activeChatTab.value;
   if (!tab) return [];
   // 如果当前数量超过限制，则截断；否则全部显示
   const limit = tabRenderLimits.value[activeChatTabId.value] || CHAT_RENDER_LIMIT;
@@ -214,20 +285,20 @@ const handleChatScroll = async (e) => {
     const tabId = activeChatTabId.value;
     const tab = chatTabs.value.find(t => t.id === tabId);
     if (!tab) return;
-    
+
     const limit = tabRenderLimits.value[tabId] || CHAT_RENDER_LIMIT;
     if (limit < tab.messages.length) {
       isPaginating = true;
       const oldHeight = e.target.scrollHeight;
       const oldScrollTop = e.target.scrollTop;
-      
+
       // 每次滚动到顶多加载 20 条
       tabRenderLimits.value[tabId] = limit + 20;
-      
+
       await nextTick();
       // 计算加入新节点后的高度差并恢复滚动位置
       e.target.scrollTop = e.target.scrollHeight - oldHeight + oldScrollTop;
-      
+
       // 释放锁，允许下次上拉触发
       setTimeout(() => { isPaginating = false; }, 50);
     }
@@ -245,8 +316,8 @@ const visibleTabs = computed(() => {
 const persistState = () => {
   const clone = chatTabs.value.map(t => ({
     ...t,
-    // 保存最近 100 条防止 JSON 爆满内存
-    messages: t.messages.slice(-100)  
+    // 保存最近 100 条防止 JSON 爆满内存；翻译中的临时状态不落盘
+    messages: t.messages.slice(-100).map(({ pending, ...m }) => m)
   }));
   invoke('save_ui_state', { account: settings.value.account || '', state: JSON.stringify(clone) }).catch(console.error);
 };
@@ -268,11 +339,19 @@ const handleTabScroll = (e) => {
   }
 };
 
+// 复制提示：短暂显示在底栏上方
+const copiedHint = ref(false);
+let copiedTimer = null;
 const copyContent = async (text) => {
   if (!text) return;
   try {
-    await navigator.clipboard.writeText(text);
-  } catch(e) {}
+    await TauriBridge.copyToClipboard(text);
+  } catch (_) {
+    try { await navigator.clipboard.writeText(text); } catch (e) { return; }
+  }
+  copiedHint.value = true;
+  clearTimeout(copiedTimer);
+  copiedTimer = setTimeout(() => { copiedHint.value = false; }, 1200);
 };
 
 const switchTab = (tabId) => {
@@ -283,38 +362,66 @@ const switchTab = (tabId) => {
   scrollToBottom(false, true);
 };
 
-const getHistoryContext = (tabId) => {
-  const tab = chatTabs.value.find(t => t.id === tabId);
-  if (!tab || !settings.value.contextCount) return [];
-  const start = Math.max(0, tab.messages.length - settings.value.contextCount);
-  const lastN = tab.messages.slice(start);
-  return lastN.map(m => ({
-    role: 'system',
-    content: `[Context] ${m.sender}: ${m.text || m.translated}`
-  }));
+// ── 自己 / 对方判断 ────────────────────────────────────────────
+// 账号文件夹名形如 "first_last" 或 "username_resident"；日志里的发送者可能是
+// "First Last"、"username"、"Display Name (first.last)" 等形式
+const selfNames = computed(() => {
+  const acc = (settings.value.account || '').trim().toLowerCase();
+  if (!acc) return [];
+  const names = new Set([acc, acc.replace(/_/g, ' '), acc.replace(/_/g, '.')]);
+  const parts = acc.split('_');
+  if (parts.length === 2 && parts[1] === 'resident') names.add(parts[0]);
+  return [...names];
+});
+const isMySelf = (sender) => {
+  const s = (sender || '').trim().toLowerCase();
+  if (s === 'you' || s === 'me') return true;
+  return selfNames.value.some(n => s === n || s.includes(`(${n})`));
 };
 
-// 获取对方发出的原文消息，不包括自己发出的，用于推断对方语言
-const getOtherRawMessages = (tabId) => {
-  const tab = chatTabs.value.find(t => t.id === tabId);
+// 翻译参考上文：同频道前 N 条（不含当前这条）
+const getHistoryContext = (tab, beforeMsg) => {
+  const count = settings.value.contextCount;
+  if (!tab || !count) return [];
+  let end = tab.messages.length;
+  if (beforeMsg) {
+    const idx = tab.messages.indexOf(beforeMsg);
+    if (idx !== -1) end = idx;
+  }
+  return tab.messages
+    .slice(Math.max(0, end - count), end)
+    .filter(m => m.sender !== 'System' && m.text)
+    .map(m => ({ sender: m.sender, text: m.text }));
+};
+
+// 获取对方发出的原文消息，不包括自己发出的，用于推断对方语言和说话风格
+const getOtherRawMessages = (tab) => {
   if (!tab) return [];
-  const myName = (settings.value.account || '').trim().toLowerCase();
-  const CONTEXT_LIMIT = 5;
-  const otherMessages = tab.messages
-    .filter(m => m.sender.trim().toLowerCase() !== myName && m.text)
-    .slice(-CONTEXT_LIMIT);
-  return otherMessages.map((m, i) => `${i + 1}. ${m.text}`);
+  return tab.messages
+    .filter(m => m.text && m.sender !== 'System' && !isMySelf(m.sender))
+    .slice(-5)
+    .map(m => m.text);
 };
 
-const inputShow = ref(false);
-const draftText = ref('');
-const inputRef  = ref(null);
-const chatScrollRef = ref(null);
+// 对方消息已经是目标语言（或只有表情/数字）时跳过翻译，省 token
+const HAN_RE = /\p{Script=Han}/gu;
+const KANA_RE = /[\p{Script=Hiragana}\p{Script=Katakana}]/gu;
+const HANGUL_RE = /\p{Script=Hangul}/gu;
+const LETTER_RE = /\p{L}/gu;
+const looksLikeTarget = (text, lang) => {
+  const letters = (text.match(LETTER_RE) || []).length;
+  if (letters === 0) return true;
+  const han = (text.match(HAN_RE) || []).length;
+  const kana = (text.match(KANA_RE) || []).length;
+  const hangul = (text.match(HANGUL_RE) || []).length;
+  const l = (lang || '').toLowerCase();
+  if (l.includes('chinese') || l.includes('中文')) return kana === 0 && han / letters >= 0.6;
+  if (l.includes('japanese')) return kana > 0 && (han + kana) / letters >= 0.6;
+  if (l.includes('korean')) return hangul / letters >= 0.6;
+  return false;
+};
 
-// AI 助手相关状态
-const aiReplyMap = ref({});   // { 'tabId:msgIndex': { loading, text } }
-const aiChat = ref({ loading: false, result: '' });
-const aiChatInput = ref('');
+const chatScrollRef = ref(null);
 
 // ── 黑名单管理 ───────────────────────────────────────────────
 const isTargetBlacklisted = (targetId) => {
@@ -356,6 +463,39 @@ watch(() => settings.value.bgOpacity, (alpha) => {
   document.documentElement.style.setProperty('--bg-opacity', alpha);
 }, { immediate: true });
 
+// ── 翻译对方消息 ──────────────────────────────────────────────
+const translateMessage = async (tab, msg) => {
+  const key = `msg:${msgKey(msg)}`;
+  const controller = startRequest(key);
+  msg.translated = '';
+  msg.error = '';
+  msg.pending = true;
+
+  const res = await LLMService.translateIncoming(
+    msg.text,
+    getHistoryContext(tab, msg),
+    (chunk) => { msg.translated += chunk; },
+    {
+      apiKey:     settings.value.apiKey,
+      baseUrl:    settings.value.baseUrl,
+      model:      settings.value.model,
+      targetLang: settings.value.recvLang,
+    },
+    { signal: controller.signal }
+  );
+  finishRequest(key, controller);
+  msg.pending = false;
+  if (!res.ok) msg.error = describeError(res);
+  return res;
+};
+
+const retranslate = async (msg) => {
+  const tab = activeChatTab.value;
+  if (!tab) return;
+  await translateMessage(tab, msg);
+  persistState();
+};
+
 onMounted(async () => {
   // 恢复窗口状态并显示
   try {
@@ -376,6 +516,8 @@ onMounted(async () => {
   };
   win.onMoved(debouncedSave);
   win.onResized(debouncedSave);
+
+  window.addEventListener('keydown', handleGlobalKeydown);
 
   // 读取持久化设置（兼容旧版单 key 格式，自动迁移）
   const legacySaved = localStorage.getItem('sl-translator-settings');
@@ -446,19 +588,16 @@ onMounted(async () => {
     const colonIdx = msgContext.indexOf(': ');
     const sender   = msgContext.slice(0, colonIdx);
     const text     = msgContext.slice(colonIdx + 2);
-    
+
     // 基础去重（防止 Firestorm 多文件记录同一个消息）
     const msgHash = `${source}||${sender}||${text}`;
     const now = Date.now();
     if (msgHash === lastMsgHash && (now - lastMsgTime) < 2000) {
-      return; 
+      return;
     }
     lastMsgHash = msgHash;
     lastMsgTime = now;
 
-    // ── 层层层屁屁屁局局尿尿尾尾尽尽尼尼尻尻尺尺 登录训练新游被拳版 尺尺尻尻尼尼尽尽尾尾尿尿局局屁屁层层
-    const accountBaseName = settings.value.account ? settings.value.account.split('_')[0].toLowerCase() : '---';
-    const isMySelf = sender.toLowerCase().includes(accountBaseName) || sender.toLowerCase() === 'me';
     const isSystemMessage = sender.toLowerCase() === 'second life';
     const isGroupFile = source.toLowerCase().includes('group');
     const skipGroupMessage = isGroupFile && !settings.value.translateGroup;
@@ -473,39 +612,37 @@ onMounted(async () => {
     let tabInfo = chatTabs.value.find(t => t.id === source);
     if (!tabInfo) {
       let title = source.replace(/\.txt$/i, '').replace(/\.log$/i, '');
-      if (source.toLowerCase() === 'conversation.log' || source.toLowerCase() === 'chat.txt') {
+      if (PUBLIC_CHAT_FILES.includes(source.toLowerCase())) {
         title = 'nearby';
       }
-      tabInfo = { id: source, title, messages: [], hasUnread: true };
-      chatTabs.value.push(tabInfo);
+      chatTabs.value.push({ id: source, title, messages: [], hasUnread: true });
+      tabInfo = chatTabs.value[chatTabs.value.length - 1];
     } else {
       tabInfo.hidden = false;
     }
-    
+
     // 标红点
     if (activeChatTabId.value !== source) {
       tabInfo.hasUnread = true;
     }
 
-    const newItem  = { time: new Date().toLocaleTimeString(), sender, text, translated: '' };
-    tabInfo.messages.push(newItem);
+    tabInfo.messages.push({ id: newMsgId(), time: new Date().toLocaleTimeString(), sender, text, translated: '' });
     const reactiveItem = tabInfo.messages[tabInfo.messages.length - 1];
-    
+
     persistState();
     // 仅当用户本来就在底部时才自动跟随新消息
     if (activeChatTabId.value === source) scrollToBottom(true, false);
 
     // 自己发的、黑名单用户或频道：渲染上屏但不翻译
     const isBlacklisted = settings.value.blacklist.some(
-      name => name.trim().toLowerCase() === sender.toLowerCase() || 
-              name.trim().toLowerCase() === source.toLowerCase() || 
+      name => name.trim().toLowerCase() === sender.toLowerCase() ||
+              name.trim().toLowerCase() === source.toLowerCase() ||
               name.trim().toLowerCase() === tabInfo.title.toLowerCase()
     );
-    if (isMySelf || isBlacklisted) return;
+    if (isMySelf(sender) || isBlacklisted) return;
 
     // 附近频道白名单过滤（私聊不受影响）
-    const PUBLIC_CHAT_FILES_WL = ['chat.txt', 'conversation.log'];
-    const isNearbyChan = PUBLIC_CHAT_FILES_WL.includes(source.toLowerCase());
+    const isNearbyChan = PUBLIC_CHAT_FILES.includes(source.toLowerCase());
     if (isNearbyChan && settings.value.nearbyWhitelistEnabled) {
       const wl = settings.value.nearbyWhitelist;
       const senderLower = sender.toLowerCase();
@@ -527,26 +664,16 @@ onMounted(async () => {
     });
     if (hasBlockedKeyword) return;
 
-    // 组织上文（将同一个对话频道里的前面 N 句当做参考喂给AI以保持连贯！）
-    const history = getHistoryContext(source);
+    // 已经是目标语言：不调用接口
+    if (looksLikeTarget(text, settings.value.recvLang)) return;
 
-    await LLMService.translateStream(text, history, (chunk) => {
-      reactiveItem.translated += chunk;
-    }, {
-      apiKey:     settings.value.apiKey,
-      baseUrl:    settings.value.baseUrl,
-      model:      settings.value.model,
-      targetLang: settings.value.recvLang,
-    });
+    await translateMessage(tabInfo, reactiveItem);
 
     // 翻译完成后若用户仍在底部则跟随滚动
     if (activeChatTabId.value === source) scrollToBottom(true, false);
 
     // 公屏频道不存档，仅私聊保存
-    const PUBLIC_CHAT_FILES = ['chat.txt', 'conversation.log'];
-    const isPublicChannel = PUBLIC_CHAT_FILES.includes(source.toLowerCase());
-
-    if (!isPublicChannel && reactiveItem.translated.trim()) {
+    if (!isNearbyChan && reactiveItem.translated.trim()) {
       invoke('append_translation_history', {
         account: settings.value.account || '',
         source,
@@ -561,9 +688,8 @@ onMounted(async () => {
 
   // 侦听全局快捷键
   await TauriBridge.onShortcutTrigger(async () => {
-    inputShow.value = true;
     await nextTick();
-    inputRef.value?.focus();
+    composerRef.value?.focus();
   });
 
   // 检查更新
@@ -573,6 +699,11 @@ onMounted(async () => {
       updateInfo.value = info;
     }
   });
+});
+
+onBeforeUnmount(() => {
+  window.removeEventListener('keydown', handleGlobalKeydown);
+  inflight.forEach(c => c.abort());
 });
 
 watch([activeTab, isListening], ([newTab, newListening]) => {
@@ -588,7 +719,7 @@ const GLOBAL_SETTINGS_KEY = 'sl-translator-global';
 // 账号级设置键（黑名单、接收语言等随账号变化）
 const accountSettingsKey = (account) => `sl-settings-${account}`;
 // 全局字段清单
-const GLOBAL_FIELDS = ['logDir', 'account', 'apiKey', 'baseUrl', 'model', 'uiLang', 'contextCount', 'translateGroup', 'viewerType', 'bgOpacity', 'nearbyWhitelistEnabled'];
+const GLOBAL_FIELDS = ['logDir', 'account', 'apiKey', 'baseUrl', 'model', 'uiLang', 'contextCount', 'translateGroup', 'viewerType', 'bgOpacity', 'nearbyWhitelistEnabled', 'sendTone', 'backTranslate'];
 
 const saveSettings = () => {
   const global = {};
@@ -675,25 +806,22 @@ const testApiConnection = async () => {
     testApiMessage.value = i18n.value.testApiNoKey;
     return;
   }
-  
+
   testApiStatus.value = 'testing';
   testApiMessage.value = i18n.value.testApiConnecting;
   saveSettings();
-  
-  let result = '';
-  await LLMService.translateStream('Test message connection please reply Hello', [], (chunk) => {
-    result += chunk;
-  }, {
+
+  const res = await LLMService.translateIncoming('Hello, nice to meet you', [], () => {}, {
     apiKey:     settings.value.apiKey,
     baseUrl:    settings.value.baseUrl,
     model:      settings.value.model,
-    targetLang: 'English'
+    targetLang: settings.value.recvLang || 'English'
   });
-  
-  if (result.includes('[\u7f51\u7edc\u9519\u8bef]') || result.includes('[\u9519\u8bef]')) {
+
+  if (!res.ok) {
     testApiStatus.value = 'error';
-    testApiMessage.value = '\u274c ' + result.replace('\n', '').trim();
-  } else if (result.trim().length > 0) {
+    testApiMessage.value = describeError(res);
+  } else if (res.text.trim().length > 0) {
     testApiStatus.value = 'success';
     testApiMessage.value = i18n.value.testApiSuccess;
   } else {
@@ -704,7 +832,7 @@ const testApiConnection = async () => {
 
 const toggleListening = async () => {
   errorMessage.value = '';
-  
+
   if (isListening.value) {
     try {
       await TauriBridge.stopLogWatcher();
@@ -714,7 +842,7 @@ const toggleListening = async () => {
     }
     return;
   }
-  
+
   if (!settings.value.logDir || !settings.value.account) {
     activeTab.value = TAB_SETTINGS;
     errorMessage.value = i18n.value.settingsIncomplete;
@@ -731,114 +859,165 @@ const toggleListening = async () => {
   }
 };
 
-// ── 快捷回复 ──────────────────────────────────────────────────────
-const sendMyMessage = async () => {
-  const text = draftText.value.trim();
-  if (!text) return;
+// ── 底部输入栏：翻译我的话 / 问 AI ─────────────────────────────
+const composerMode = ref('translate');   // 'translate' | 'ask'
+const composerInput = ref('');
+const composerRef = ref(null);
+// 翻译模式的结果
+const composer = ref({ visible: false, loading: false, source: '', translation: '', back: '', error: '' });
+// 问 AI 模式的结果
+const aiChat = ref({ visible: false, loading: false, result: '', error: '' });
 
-  draftText.value  = '';
-  inputShow.value  = false;
+// 语气和目标语言按频道记忆
+const activeTone = computed({
+  get: () => activeChatTab.value?.tone || settings.value.sendTone || 'natural',
+  set: (v) => { if (activeChatTab.value) { activeChatTab.value.tone = v; persistState(); } }
+});
+const activeSendLang = computed({
+  get: () => activeChatTab.value?.sendLang || 'auto',
+  set: (v) => { if (activeChatTab.value) { activeChatTab.value.sendLang = v; persistState(); } }
+});
 
-  const item = {
-    time: new Date().toLocaleTimeString(),
-    sender: settings.value.account || 'Me',
+const utf8Bytes = (s) => new TextEncoder().encode(s).length;
+const composerBytes = computed(() => utf8Bytes(composer.value.translation || ''));
+const composerOverLimit = computed(() => composerBytes.value > SL_MSG_BYTE_LIMIT);
+
+const runTranslate = async (text) => {
+  const tab = activeChatTab.value;
+  const controller = startRequest('composer');
+  composer.value = { visible: true, loading: true, source: text, translation: '', back: '', error: '' };
+
+  const res = await LLMService.translateOutgoing(
     text,
-    translated: ''
-  };
-  const tab = chatTabs.value.find(t => t.id === activeChatTabId.value);
-  if (tab) {
-    tab.messages.push(item);
+    {
+      otherMessages: getOtherRawMessages(tab),
+      tone:          activeTone.value,
+      targetLang:    activeSendLang.value,
+      myLang:        settings.value.recvLang || 'Simplified Chinese',
+      withBack:      settings.value.backTranslate,
+    },
+    ({ translation, back }) => {
+      if (controller.signal.aborted) return;
+      composer.value.translation = translation;
+      composer.value.back = back;
+    },
+    { apiKey: settings.value.apiKey, baseUrl: settings.value.baseUrl, model: settings.value.model },
+    { signal: controller.signal }
+  );
+  finishRequest('composer', controller);
+  // 请求已被新的请求或关闭操作取消：界面状态归后来者管
+  if (res.aborted) return;
+
+  composer.value.loading = false;
+  composer.value.translation = res.translation;
+  composer.value.back = res.back;
+  if (!res.ok) {
+    composer.value.error = describeError(res);
+    return;
   }
-  const reactiveItem = tab ? tab.messages[tab.messages.length - 1] : item;
-  scrollToBottom(true);
 
-  const otherMessages = getOtherRawMessages(activeChatTabId.value);
-  const contextBlock = otherMessages.length > 0
-    ? `这是对方发给我的最近消息（最多 5 条）\n${otherMessages.join('\n')}\n\n我想回复：`
-    : ``;
-  const sendText = contextBlock + text;
-
-  let translatedResult = '';
-  await LLMService.translateStream(sendText, [], (chunk) => {
-    translatedResult  += chunk;
-    reactiveItem.translated += chunk;
-  }, {
-    apiKey:     settings.value.apiKey,
-    baseUrl:    settings.value.baseUrl,
-    model:      settings.value.model,
-    direction:  'send',
-  });
-
-  if (translatedResult.trim()) {
+  if (res.translation) {
+    await copyContent(res.translation);
     invoke('append_translation_history', {
       account: settings.value.account || '',
       source: activeChatTabId.value,
-      timestamp: item.time,
-      sender: item.sender,
+      timestamp: new Date().toLocaleTimeString(),
+      sender: settings.value.account || 'Me',
       text,
-      translated: translatedResult
+      translated: res.translation
     }).catch(e => console.error("保存历史记录失败", e));
   }
-  
-  persistState();
-
-  await TauriBridge.copyToClipboard(translatedResult);
 };
 
-const closeInput = () => {
-  inputShow.value = false;
-  draftText.value = '';
+const runAsk = async (prompt) => {
+  const tab = activeChatTab.value;
+  const controller = startRequest('ask');
+  aiChat.value = { visible: true, loading: true, result: '', error: '' };
+
+  const res = await LLMService.chatStream(
+    prompt,
+    tab ? tab.messages.slice(-8) : [],
+    (chunk) => { if (!controller.signal.aborted) aiChat.value.result += chunk; },
+    { apiKey: settings.value.apiKey, baseUrl: settings.value.baseUrl, model: settings.value.model },
+    { signal: controller.signal }
+  );
+  finishRequest('ask', controller);
+  if (res.aborted) return;
+  aiChat.value.loading = false;
+  if (!res.ok) aiChat.value.error = describeError(res);
+};
+
+const submitComposer = () => {
+  const text = composerInput.value.trim();
+  if (!text) return;
+  composerInput.value = '';
+  if (composerMode.value === 'translate') runTranslate(text);
+  else runAsk(text);
+};
+
+const regenerate = () => {
+  if (composer.value.source) runTranslate(composer.value.source);
+};
+
+const closeComposer = () => {
+  cancelRequest('composer');
+  composer.value = { visible: false, loading: false, source: '', translation: '', back: '', error: '' };
+};
+const closeAiChat = () => {
+  cancelRequest('ask');
+  aiChat.value = { visible: false, loading: false, result: '', error: '' };
 };
 
 // ── AI 气泡：建议回复 ──────────────────────────────────────────
-const getAiReplyKey = (tabId, msgIndex) => `${tabId}:${msgIndex}`;
+const aiReplyMap = ref({});   // { 'tabId:msgKey': { loading, suggestions, raw, error } }
+const getAiReplyKey = (tabId, msg) => `${tabId}:${msgKey(msg)}`;
 
-const askHowToReply = async (msg, key) => {
+const askHowToReply = async (msg) => {
+  const key = getAiReplyKey(activeChatTabId.value, msg);
   if (aiReplyMap.value[key]?.loading) return;
 
-  aiReplyMap.value[key] = { loading: true, text: '' };
+  const tab = activeChatTab.value;
+  const controller = startRequest(`reply:${key}`);
+  aiReplyMap.value[key] = { loading: true, suggestions: [], raw: '', error: '' };
 
-  const tabId = activeChatTabId.value;
-  const tab = chatTabs.value.find(t => t.id === tabId);
-  const contextMessages = tab ? tab.messages.slice(-8) : [];
-
-  await LLMService.chatStream(
-    `How should I reply to this message: "${msg.text}"`,
-    contextMessages,
-    (chunk) => { aiReplyMap.value[key].text += chunk; },
+  const res = await LLMService.suggestReplies(
+    msg,
+    tab ? tab.messages.slice(-8) : [],
+    { tone: activeTone.value, myLang: settings.value.recvLang || 'Simplified Chinese' },
+    (suggestions, raw) => {
+      const box = aiReplyMap.value[key];
+      if (!box || controller.signal.aborted) return;
+      box.suggestions = suggestions;
+      box.raw = raw;
+    },
     { apiKey: settings.value.apiKey, baseUrl: settings.value.baseUrl, model: settings.value.model },
-    'reply'
+    { signal: controller.signal }
   );
+  finishRequest(`reply:${key}`, controller);
 
-  aiReplyMap.value[key].loading = false;
+  const box = aiReplyMap.value[key];
+  if (!box || res.aborted) return;
+  box.loading = false;
+  box.suggestions = res.suggestions;
+  box.raw = res.raw;
+  if (!res.ok) box.error = describeError(res);
 };
 
 const closeAiReply = (key) => {
-  delete aiReplyMap.value[key];
-  // 触发响应式更新
-  aiReplyMap.value = { ...aiReplyMap.value };
+  cancelRequest(`reply:${key}`);
+  const next = { ...aiReplyMap.value };
+  delete next[key];
+  aiReplyMap.value = next;
 };
 
-// ── AI 底栏对话助手 ────────────────────────────────────────────
-const sendAiChat = async () => {
-  const prompt = aiChatInput.value.trim();
-  if (!prompt || aiChat.value.loading) return;
-
-  aiChat.value = { loading: true, result: '' };
-  aiChatInput.value = '';
-
-  const tab = chatTabs.value.find(t => t.id === activeChatTabId.value);
-  const contextMessages = tab ? tab.messages.slice(-8) : [];
-
-  await LLMService.chatStream(
-    prompt,
-    contextMessages,
-    (chunk) => { aiChat.value.result += chunk; },
-    { apiKey: settings.value.apiKey, baseUrl: settings.value.baseUrl, model: settings.value.model },
-    'chat'
-  );
-
-  aiChat.value.loading = false;
+// ── Esc：从最上层开始逐层关闭 ─────────────────────────────────
+const handleGlobalKeydown = (e) => {
+  if (e.key !== 'Escape') return;
+  if (activeTab.value === TAB_SETTINGS) { activeTab.value = TAB_CHAT; return; }
+  const replyKeys = Object.keys(aiReplyMap.value);
+  if (replyKeys.length) { closeAiReply(replyKeys[replyKeys.length - 1]); return; }
+  if (composer.value.visible) { closeComposer(); return; }
+  if (aiChat.value.visible) { closeAiChat(); return; }
 };
 
 // ── 工具 ──────────────────────────────────────────────────────────
@@ -939,8 +1118,14 @@ const openTutorial = async () => {
       <Transition name="slide-down">
         <section class="settings-panel" v-if="activeTab === TAB_SETTINGS">
 
+          <div class="settings-head">
+            <span>{{ i18n.settingTitle }}</span>
+            <button class="icon-btn" :title="i18n.closeLabel + ' (Esc)'" @click="activeTab = TAB_CHAT"><X :size="14" /></button>
+          </div>
+
           <div v-if="errorMessage" class="error-banner">
-            <span style="white-space: pre-wrap;">{{ errorMessage }}</span>
+            <span style="white-space: pre-wrap; flex: 1;">{{ errorMessage }}</span>
+            <button class="icon-btn" :title="i18n.closeLabel" @click="errorMessage = ''"><X :size="12" /></button>
           </div>
 
           <!-- ① 连接 -->
@@ -981,7 +1166,7 @@ const openTutorial = async () => {
                     </select>
                     <ChevronDown :size="14" class="select-chevron" />
                   </div>
-                  <button class="btn-browse" @click="refreshAccounts" :title="i18n.refreshAccounts">&#x21bb;</button>
+                  <button class="btn-browse" @click="refreshAccounts" :title="i18n.refreshAccounts"><RotateCw :size="12" /></button>
                 </div>
                 <div class="form-hint" v-if="accountList.length === 0">{{ i18n.slAccountNoDirHint }}</div>
               </div>
@@ -1034,6 +1219,21 @@ const openTutorial = async () => {
               <div class="form-section">
                 <label class="form-label">{{ i18n.ctxCountSetting }}</label>
                 <input v-model.number="settings.contextCount" type="number" class="form-input" placeholder="5" />
+              </div>
+              <div class="form-section">
+                <label class="form-label">{{ i18n.defaultToneLabel }}</label>
+                <div class="select-wrap">
+                  <select v-model="settings.sendTone" class="form-select">
+                    <option v-for="t in TONES" :key="t" :value="t">{{ i18n['tone_' + t] }}</option>
+                  </select>
+                  <ChevronDown :size="14" class="select-chevron" />
+                </div>
+              </div>
+              <div class="form-section">
+                <label class="form-label" style="text-transform:none;letter-spacing:0;font-weight:500;">
+                  <input type="checkbox" v-model="settings.backTranslate" style="vertical-align:middle;margin-right:5px;" />
+                  {{ i18n.backTranslateCb }}
+                </label>
               </div>
               <div class="form-section" style="margin-bottom:0">
                 <label class="form-label" style="text-transform:none;letter-spacing:0;font-weight:500;">
@@ -1120,9 +1320,8 @@ const openTutorial = async () => {
       </Transition>
 
 
-      <!-- API Key 快速条（开启监听后若未填会提示） -->
-
-      <div class="apikey-bar" v-if="isListening && !settings.apiKey">
+      <!-- API Key 快速条（开启监听后若未填会提示，可关闭） -->
+      <div class="apikey-bar" v-if="isListening && !settings.apiKey && !apiKeyBarDismissed">
         <KeyRound :size="13" class="apikey-icon" />
         <span class="apikey-hint">{{ i18n.apiKeyFloatTip }}</span>
         <input
@@ -1132,126 +1331,170 @@ const openTutorial = async () => {
           placeholder="sk-xxxx..."
           @change="saveSettings"
         />
+        <button class="icon-btn" :title="i18n.closeLabel" @click="apiKeyBarDismissed = true"><X :size="12" /></button>
       </div>
 
       <!-- 选项卡展示区 -->
       <div class="chat-tab-bar" v-if="activeTab === TAB_CHAT && isListening" ref="tabBarRef" @wheel.prevent="handleTabScroll">
-        <div 
-          v-for="t in visibleTabs" 
-          :key="t.id" 
-          class="chat-tab-item" 
+        <div
+          v-for="t in visibleTabs"
+          :key="t.id"
+          class="chat-tab-item"
           :class="{ active: activeChatTabId === t.id, unread: t.hasUnread }"
           @click="switchTab(t.id)">
-          <span class="tab-title">{{ (t.id === 'chat.txt' || t.id === 'conversation.log') ? i18n.nearbyTab : t.title }}</span>
+          <span class="tab-title">{{ PUBLIC_CHAT_FILES.includes(t.id) ? i18n.nearbyTab : t.title }}</span>
           <button class="tab-close tab-ctrl-btn" :title="i18n.muteChanTip" @click.stop="toggleBlacklist(t.id)">
             <BellOff v-if="isTargetBlacklisted(t.id)" :size="10" />
             <Bell v-else :size="10" />
           </button>
-          <button class="tab-close" @click.stop="closeTab(t.id)" v-if="t.id !== 'chat.txt' && t.id !== 'conversation.log'"><X :size="10" /></button>
+          <button class="tab-close" @click.stop="closeTab(t.id)" v-if="!PUBLIC_CHAT_FILES.includes(t.id)"><X :size="10" /></button>
         </div>
       </div>
 
       <!-- 聊天面板 -->
       <div class="chat-list" ref="chatScrollRef" @scroll="handleChatScroll">
         <div
-          v-for="(msg, i) in activeTabMessages"
-          :key="i"
+          v-for="msg in activeTabMessages"
+          :key="msgKey(msg)"
           class="message-group"
-          :class="{ 'self-msg': msg.sender === (settings.account || 'Me') }"
+          :class="{ 'self-msg': isMySelf(msg.sender) }"
         >
-          <!-- 用全量数组中的真实索引作为 key，防止分页后索引漂移 -->
-          <template v-if="true">
-            <div class="message-meta">
-              <span class="msg-sender">{{ msg.sender }}</span>
-              <span class="msg-time">{{ msg.time }}</span>
-            </div>
-            <div class="message-bubble group">
-              <div class="source-text">{{ msg.text }}</div>
-              <div class="translate-text" v-if="msg.translated && msg.translated.trim() !== msg.text.trim()">{{ msg.translated }}</div>
-              <!-- 气泡操作行 -->
-              <div class="bubble-actions">
-                <button class="bubble-action-btn" @click="copyContent(msg.text)" :title="i18n.copyOriginal">
-                  <Copy :size="11" />
-                </button>
-                <button class="bubble-action-btn" v-if="msg.translated && msg.translated !== msg.text" @click="copyContent(msg.translated)" :title="i18n.copyTranslation">
-                  <MessageSquareDot :size="11" />
+          <div class="message-meta">
+            <span class="msg-sender">{{ msg.sender }}</span>
+            <span class="msg-time">{{ msg.time }}</span>
+          </div>
+          <div class="message-bubble group">
+            <div class="source-text">{{ msg.text }}</div>
+            <div class="translate-text" v-if="msg.translated && msg.translated.trim() !== msg.text.trim()">{{ msg.translated }}</div>
+            <div class="msg-error" v-if="msg.error">{{ msg.error }}</div>
+            <!-- 气泡操作行 -->
+            <div class="bubble-actions">
+              <button class="bubble-action-btn" @click="copyContent(msg.text)" :title="i18n.copyOriginal">
+                <Copy :size="11" />
+              </button>
+              <button class="bubble-action-btn" v-if="msg.translated && msg.translated !== msg.text" @click="copyContent(msg.translated)" :title="i18n.copyTranslation">
+                <MessageSquareDot :size="11" />
+              </button>
+              <template v-if="!isMySelf(msg.sender) && msg.sender !== 'System'">
+                <button class="bubble-action-btn" :class="{ loading: msg.pending }" @click="retranslate(msg)" :title="i18n.retranslate">
+                  <RotateCw :size="11" />
                 </button>
                 <button
                   class="bubble-action-btn"
-                  v-if="msg.sender !== (settings.account || 'Me')"
-                  @click="askHowToReply(msg, getAiReplyKey(activeChatTabId, msg.time + msg.sender))"
+                  @click="askHowToReply(msg)"
                   :title="i18n.suggestReply"
-                  :class="{ 'loading': aiReplyMap[getAiReplyKey(activeChatTabId, msg.time + msg.sender)]?.loading }"
+                  :class="{ 'loading': aiReplyMap[getAiReplyKey(activeChatTabId, msg)]?.loading }"
                 >
                   <Sparkles :size="11" />
                 </button>
-              </div>
+              </template>
             </div>
-            <!-- AI 建议回复展开区 -->
-            <div
-              v-if="aiReplyMap[getAiReplyKey(activeChatTabId, msg.time + msg.sender)]"
-              class="ai-reply-box"
-            >
-              <div class="ai-reply-content">
-                <span v-if="aiReplyMap[getAiReplyKey(activeChatTabId, msg.time + msg.sender)].loading" class="ai-thinking">✨ 思考中…</span>
-                <span v-else>{{ aiReplyMap[getAiReplyKey(activeChatTabId, msg.time + msg.sender)].text }}</span>
-              </div>
-              <div style="display:flex;gap:4px;">
-                <button
-                  v-if="!aiReplyMap[getAiReplyKey(activeChatTabId, msg.time + msg.sender)].loading && aiReplyMap[getAiReplyKey(activeChatTabId, msg.time + msg.sender)].text"
-                  class="bubble-action-btn"
-                  @click="copyContent(aiReplyMap[getAiReplyKey(activeChatTabId, msg.time + msg.sender)].text)"
-                  :title="i18n.copyResult"
-                >
-                  <Copy :size="11" />
-                </button>
-                <button
-                  v-if="!aiReplyMap[getAiReplyKey(activeChatTabId, msg.time + msg.sender)].loading"
-                  class="bubble-action-btn danger"
-                  @click="closeAiReply(getAiReplyKey(activeChatTabId, msg.time + msg.sender))"
-                  title="关闭"
-                >
-                  <X :size="11" />
-                </button>
-              </div>
+          </div>
+          <!-- AI 建议回复展开区：关闭按钮始终可用，加载中关闭会取消请求 -->
+          <div v-if="aiReplyMap[getAiReplyKey(activeChatTabId, msg)]" class="ai-reply-box">
+            <div class="ai-reply-head">
+              <span>{{ i18n.suggestReply }}</span>
+              <button class="icon-btn" :title="i18n.closeLabel + ' (Esc)'" @click="closeAiReply(getAiReplyKey(activeChatTabId, msg))"><X :size="12" /></button>
             </div>
-          </template>
+            <template v-for="box in [aiReplyMap[getAiReplyKey(activeChatTabId, msg)]]" :key="'box'">
+              <button
+                v-for="(s, si) in box.suggestions"
+                :key="si"
+                class="suggestion-item"
+                :title="i18n.copyResult"
+                @click="copyContent(s.reply)"
+              >
+                <span class="suggestion-reply">{{ s.reply }}</span>
+                <span class="suggestion-meaning" v-if="s.meaning">{{ s.meaning }}</span>
+              </button>
+              <span v-if="box.loading && !box.suggestions.length" class="ai-thinking">{{ i18n.thinking }}</span>
+              <span v-if="box.error" class="msg-error">{{ box.error }}</span>
+            </template>
+          </div>
         </div>
       </div>
 
-      <!-- 底部 AI 对话助手 -->
+      <!-- 底部输入栏 -->
       <div class="ai-chat-panel" v-if="activeTab === TAB_CHAT && isListening">
+        <div v-if="copiedHint" class="copied-hint">{{ i18n.copied }}</div>
         <div v-if="isTargetBlacklisted(activeChatTabId)" class="blacklist-overlay-msg">
           {{ i18n.mutedOverlay }}
         </div>
         <template v-else>
-          <!-- AI 回复结果区 -->
-          <div v-if="aiChat.result || aiChat.loading" class="ai-chat-result">
-            <div class="ai-chat-result-text">
-              <span v-if="aiChat.loading && !aiChat.result" class="ai-thinking">✨ 思考中…</span>
-              <span v-else>{{ aiChat.result }}</span>
+          <!-- 翻译结果 -->
+          <div v-if="composerMode === 'translate' && composer.visible" class="ai-chat-result">
+            <div class="result-source">{{ composer.source }}</div>
+            <div class="ai-chat-result-text result-translation">
+              <span v-if="composer.loading && !composer.translation" class="ai-thinking">{{ i18n.thinking }}</span>
+              <span v-else>{{ composer.translation }}</span>
             </div>
+            <div v-if="composer.back" class="result-back"><span class="result-back-label">{{ i18n.backLabel }}</span>{{ composer.back }}</div>
+            <div v-if="composerOverLimit" class="msg-error">{{ i18n.overLimit.replace('{n}', composerBytes).replace('{max}', SL_MSG_BYTE_LIMIT) }}</div>
+            <div v-if="composer.error" class="msg-error">{{ composer.error }}</div>
             <div class="ai-chat-result-actions">
-              <button v-if="aiChat.result" class="bubble-action-btn" @click="copyContent(aiChat.result)" :title="i18n.copyResult">
+              <button v-if="composer.translation && !composer.loading" class="bubble-action-btn" @click="copyContent(composer.translation)">
                 <Copy :size="11" /> {{ i18n.copyResult }}
               </button>
-              <button class="bubble-action-btn danger" @click="aiChat = { loading: false, result: '' }" :title="i18n.clearResult">
+              <button v-if="!composer.loading" class="bubble-action-btn" @click="regenerate">
+                <RotateCw :size="11" /> {{ i18n.regenerate }}
+              </button>
+              <button class="bubble-action-btn danger" style="margin-left:auto;" :title="i18n.closeLabel + ' (Esc)'" @click="closeComposer">
+                <X :size="11" /> {{ i18n.closeLabel }}
+              </button>
+            </div>
+          </div>
+          <!-- 问 AI 结果 -->
+          <div v-if="composerMode === 'ask' && aiChat.visible" class="ai-chat-result">
+            <div class="ai-chat-result-text">
+              <span v-if="aiChat.loading && !aiChat.result" class="ai-thinking">{{ i18n.thinking }}</span>
+              <span v-else>{{ aiChat.result }}</span>
+            </div>
+            <div v-if="aiChat.error" class="msg-error">{{ aiChat.error }}</div>
+            <div class="ai-chat-result-actions">
+              <button v-if="aiChat.result && !aiChat.loading" class="bubble-action-btn" @click="copyContent(aiChat.result)">
+                <Copy :size="11" /> {{ i18n.copyResult }}
+              </button>
+              <button class="bubble-action-btn danger" style="margin-left:auto;" :title="i18n.closeLabel + ' (Esc)'" @click="closeAiChat">
                 <X :size="11" /> {{ i18n.clearResult }}
               </button>
             </div>
           </div>
+          <!-- 工具行：模式 / 语气 / 目标语言 -->
+          <div class="composer-toolbar">
+            <div class="mode-switch">
+              <button :class="{ active: composerMode === 'translate' }" @click="composerMode = 'translate'">
+                <Languages :size="11" /> {{ i18n.modeTranslate }}
+              </button>
+              <button :class="{ active: composerMode === 'ask' }" @click="composerMode = 'ask'">
+                <Bot :size="11" /> {{ i18n.modeAsk }}
+              </button>
+            </div>
+            <template v-if="composerMode === 'translate'">
+              <label class="mini-select">
+                <span>{{ i18n.toneLabel }}</span>
+                <select v-model="activeTone">
+                  <option v-for="t in TONES" :key="t" :value="t">{{ i18n['tone_' + t] }}</option>
+                </select>
+              </label>
+              <label class="mini-select">
+                <span>{{ i18n.sendLangLabel }}</span>
+                <select v-model="activeSendLang">
+                  <option v-for="l in SEND_LANGS" :key="l" :value="l">{{ l === 'auto' ? i18n.langAuto : l }}</option>
+                </select>
+              </label>
+            </template>
+          </div>
           <!-- 输入行 -->
           <div class="ai-chat-input-row">
             <textarea
+              ref="composerRef"
               class="inline-input ai-chat-textarea"
-              v-model="aiChatInput"
-              :placeholder="i18n.aiChatPlc"
+              v-model="composerInput"
+              :placeholder="composerMode === 'translate' ? i18n.composerPlc : i18n.askPlc"
               rows="1"
-              @keydown.enter.exact.prevent="sendAiChat"
-              @keydown.shift.enter.exact="() => {}"
-              :disabled="aiChat.loading"
+              @keydown.enter.exact.prevent="submitComposer"
             />
-            <button class="btn-send-inline" @click="sendAiChat" :disabled="aiChat.loading">
+            <button class="btn-send-inline" @click="submitComposer">
               <Send :size="14" />
             </button>
           </div>

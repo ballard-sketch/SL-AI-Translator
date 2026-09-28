@@ -339,12 +339,14 @@ html, body, #app {
   border-radius: 13px 3px 13px 13px;
 }
 
-.source-text    { font-size: 13px; line-height: 1.55; color: rgba(255,255,255,.8); }
+.source-text    { font-size: 13px; line-height: 1.55; color: rgba(255,255,255,.8); white-space: pre-wrap; word-break: break-word; }
 .translate-text {
   font-size: 13px; line-height: 1.55; color: var(--text-gold);
   margin-top: 5px; padding-top: 5px;
   border-top: 1px dashed rgba(255,255,255,.08);
+  white-space: pre-wrap; word-break: break-word;
 }
+.msg-error { font-size: 11px; color: #f87171; margin-top: 4px; }
 
 /* ── 快捷输入浮层 ───────────────────────────────────────────── */
 .fade-enter-active, .fade-leave-active { transition: opacity .18s ease; }
@@ -490,12 +492,30 @@ html, body, #app {
   border-color: rgba(239,68,68,0.3);
 }
 
+/* 通用小图标按钮（关闭等） */
+.icon-btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 22px; height: 22px; flex-shrink: 0;
+  background: transparent; border: none; border-radius: 4px;
+  color: var(--text-muted); cursor: pointer;
+  transition: background .15s, color .15s;
+}
+.icon-btn:hover { background: rgba(255,255,255,.08); color: var(--text-main); }
+
+.settings-head {
+  display: flex; align-items: center; justify-content: space-between;
+  font-size: 13px; font-weight: 600; color: var(--text-main);
+  margin-bottom: 10px;
+}
+
 /* AI 建议回复气泡 */
 .ai-reply-box {
   display: flex;
-  align-items: flex-start;
+  flex-direction: column;
+  align-items: stretch;
   gap: 6px;
   margin-top: 4px;
+  min-width: 220px;
   max-width: 92%;
   padding: 8px 10px;
   background: rgba(99,102,241,0.08);
@@ -504,11 +524,28 @@ html, body, #app {
   font-size: 12px;
   color: #a5b4fc;
 }
-.ai-reply-content { flex: 1; line-height: 1.6; white-space: pre-wrap; }
+.ai-reply-head {
+  display: flex; align-items: center; justify-content: space-between;
+  font-size: 11px; color: var(--text-muted);
+}
+.suggestion-item {
+  display: flex; flex-direction: column; gap: 2px;
+  text-align: left; width: 100%;
+  padding: 6px 8px;
+  background: rgba(0,0,0,.25);
+  border: 1px solid rgba(255,255,255,.06);
+  border-radius: 5px;
+  cursor: pointer; font-family: inherit;
+  transition: border-color .15s, background .15s;
+}
+.suggestion-item:hover { border-color: rgba(99,102,241,.5); background: rgba(99,102,241,.12); }
+.suggestion-reply { font-size: 12.5px; color: #e0e7ff; line-height: 1.5; white-space: pre-wrap; }
+.suggestion-meaning { font-size: 11px; color: var(--text-muted); line-height: 1.4; }
 .ai-thinking { opacity: 0.6; font-style: italic; animation: pulseAnim 1.5s infinite; }
 
-/* ── 底部 AI 对话助手面板 ─────────────────────────────────────── */
+/* ── 底部输入栏 ─────────────────────────────────────────────── */
 .ai-chat-panel {
+  position: relative;
   flex-shrink: 0;
   border-top: 1px solid rgba(255,255,255,0.05);
   background: rgba(10, 14, 26, 0.95);
@@ -532,9 +569,58 @@ html, body, #app {
   display: flex; gap: 6px;
 }
 
+.result-source {
+  font-size: 11px; color: var(--text-muted);
+  white-space: pre-wrap; margin-bottom: 4px;
+  max-height: 48px; overflow-y: auto;
+}
+.result-translation { color: var(--text-gold); font-size: 13px; }
+.result-back {
+  font-size: 11.5px; color: #94a3b8; line-height: 1.5;
+  white-space: pre-wrap; margin-bottom: 6px;
+}
+.result-back-label {
+  display: inline-block; margin-right: 6px; padding: 0 5px;
+  border: 1px solid rgba(255,255,255,.12); border-radius: 3px;
+  font-size: 10px; color: var(--text-muted);
+}
+
+.copied-hint {
+  position: absolute; top: -26px; left: 50%; transform: translateX(-50%);
+  padding: 3px 10px; border-radius: 4px;
+  background: rgba(16,185,129,.9); color: #fff; font-size: 11px;
+  pointer-events: none;
+}
+
+.composer-toolbar {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 8px 14px 0;
+}
+.mode-switch {
+  display: inline-flex;
+  border: 1px solid rgba(255,255,255,.1); border-radius: 5px; overflow: hidden;
+}
+.mode-switch button {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 3px 9px; font-size: 11px;
+  background: transparent; border: none; color: #94a3b8; cursor: pointer;
+}
+.mode-switch button + button { border-left: 1px solid rgba(255,255,255,.1); }
+.mode-switch button.active { background: rgba(99,102,241,.3); color: #e0e7ff; }
+.mini-select {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-size: 11px; color: var(--text-muted);
+}
+.mini-select select {
+  background: rgba(0,0,0,.35); color: var(--text-main);
+  border: 1px solid rgba(255,255,255,.1); border-radius: 4px;
+  padding: 2px 4px; font-size: 11px; outline: none; cursor: pointer;
+}
+.mini-select select:focus { border-color: var(--accent); }
+
 .ai-chat-input-row {
   display: flex; align-items: flex-end; gap: 8px;
-  padding: 10px 14px;
+  padding: 8px 14px 10px;
 }
 .ai-chat-textarea {
   resize: vertical;
