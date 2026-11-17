@@ -13,7 +13,7 @@ import {
   Sparkles, Activity, Play, Minus, X,
   Settings, MessageSquareDot, Send, KeyRound,
   FolderOpen, User, ChevronDown, Pin, PinOff, BookText,
-  Bell, BellOff, Copy, HelpCircle, RotateCw, Languages, Bot
+  Bell, BellOff, Copy, HelpCircle, RotateCw, Languages, Bot, UserX, UserCheck
 } from 'lucide-vue-next';
 
 // ── 常量 ──────────────────────────────────────────────────────────
@@ -63,6 +63,7 @@ const settings = ref({
   nearbyWhitelistEnabled: false, // 附近频道白名单开关
   nearbyWhitelist: [],           // 白名单用户名数组（附近频道）
   keywordBlocklist: [],          // 关键词屏蔽数组（含此词不翻译）
+  noTranslate: [],               // 不用翻译的人：消息照常显示，但不自动调接口
   sendTone: 'natural',           // 新频道默认语气
   backTranslate: true,           // 发送翻译时附带回译
   glossary: [],                  // 术语表：每行 "词" 或 "A = B"
@@ -112,6 +113,11 @@ const I18N_BUNDLES = {
     nearbyWhitelistCb: "启用附近白名单（仅翻译白名单内用户的消息，私聊不受影响）",
     nearbyWhitelistPlc: "每行一个用户名，可从Profile复制过来",
     keywordBlocklistLabel: "关键词屏蔽（消息含以下词时不翻译）",
+    noTranslateLabel: "不用翻译的人（消息照常显示，不自动翻译，节省 Token）",
+    noTranslatePlc: "每行一个名字，例如：\nAlice Resident\nbob.smith",
+    noTranslateAdd: "不再自动翻译此人",
+    noTranslateRemove: "恢复自动翻译此人",
+    noTranslateTag: "不翻译",
     keywordBlocklistPlc: "每行一个关键词，例如：\nis offline\n離開該區域",
     secTranslation: "翻译参数",
     secFilter: "过滤规则",
@@ -185,6 +191,11 @@ const I18N_BUNDLES = {
     nearbyWhitelistCb: "Enable whitelist for Nearby Chat (only translate whitelisted users; IMs unaffected)",
     nearbyWhitelistPlc: "One username per line, copy from Profile",
     keywordBlocklistLabel: "Keyword Blocklist (skip translation if message contains any keyword)",
+    noTranslateLabel: "People who don't need translation (shown as usual, never auto-translated, saves tokens)",
+    noTranslatePlc: "One name per line, e.g.:\nAlice Resident\nbob.smith",
+    noTranslateAdd: "Stop auto-translating this person",
+    noTranslateRemove: "Auto-translate this person again",
+    noTranslateTag: "no translation",
     keywordBlocklistPlc: "One keyword per line, e.g.:\nis offline\n離開該區域",
     secTranslation: "Translation",
     secFilter: "Filters",
@@ -465,6 +476,43 @@ const recvLangChoice = computed({
 });
 const recvLangUnknown = computed(() => !!settings.value.recvLang && !resolveLang(settings.value.recvLang));
 
+const noTranslateRaw = computed({
+  get: () => settings.value.noTranslate.join('\n'),
+  set: (v) => { settings.value.noTranslate = v.split('\n'); }
+});
+
+// ── 不用翻译的人 ──────────────────────────────────────────────
+// 日志里的发送者可能是 "Alice Resident"、"alice"、"Display Name (bob.smith)" 等形式；
+// 名单里填显示名、用户名（点或空格都行）都能匹配
+const normName = (x) => (x || '').trim().toLowerCase().replace(/\./g, ' ').replace(/\s+resident$/, '').replace(/\s+/g, ' ');
+const senderNameKeys = (sender) => {
+  const raw = (sender || '').trim();
+  const keys = new Set([normName(raw)]);
+  const m = raw.match(/^(.*?)\s*\(([^()]+)\)\s*$/);
+  let username = '';
+  if (m) {
+    if (m[1]) keys.add(normName(m[1]));
+    keys.add(normName(m[2]));
+    username = m[2].trim();
+  }
+  keys.delete('');
+  return { keys, username };
+};
+const isNoTranslate = (sender) => {
+  const { keys } = senderNameKeys(sender);
+  return (settings.value.noTranslate || []).some(n => { const k = normName(n); return k && keys.has(k); });
+};
+const toggleNoTranslate = (sender) => {
+  const { keys, username } = senderNameKeys(sender);
+  const list = settings.value.noTranslate || [];
+  if (isNoTranslate(sender)) {
+    settings.value.noTranslate = list.filter(n => !keys.has(normName(n)));
+  } else {
+    // 优先记用户名，显示名改了也还能认出来
+    settings.value.noTranslate = [...list.filter(n => n.trim()), username || (sender || '').trim()];
+  }
+};
+
 // 所有大模型请求共用的配置
 const llmConfig = (extra = {}) => ({
   apiKey:   settings.value.apiKey,
@@ -725,6 +773,9 @@ onMounted(async () => {
     );
     if (isMySelf(sender) || isBlacklisted) return;
 
+    // 不用翻译的人：照常显示，不调接口（需要时可点气泡上的"重新翻译"手动翻）
+    if (isNoTranslate(sender)) return;
+
     // 附近频道白名单过滤（私聊不受影响）
     const isNearbyChan = PUBLIC_CHAT_FILES.includes(source.toLowerCase());
     if (isNearbyChan && settings.value.nearbyWhitelistEnabled) {
@@ -822,6 +873,7 @@ const saveSettings = () => {
       nearbyWhitelist:    settings.value.nearbyWhitelist,
       keywordBlocklist:   settings.value.keywordBlocklist,
       glossary:           settings.value.glossary,
+      noTranslate:        settings.value.noTranslate,
     };
     localStorage.setItem(accountSettingsKey(settings.value.account), JSON.stringify(perAccount));
   }
@@ -849,12 +901,14 @@ const loadAccountSettings = () => {
       settings.value.nearbyWhitelist    = parsed.nearbyWhitelist    ?? [];
       settings.value.keywordBlocklist   = parsed.keywordBlocklist   ?? [];
       settings.value.glossary           = parsed.glossary           ?? [];
+      settings.value.noTranslate        = parsed.noTranslate        ?? [];
     } else {
       // 新账号：重置账号级字段为默认值
       settings.value.blacklist        = [];
       settings.value.nearbyWhitelist  = [];
       settings.value.keywordBlocklist = [];
       settings.value.glossary         = [];
+      settings.value.noTranslate      = [];
     }
   } catch (_) {}
 };
@@ -1418,6 +1472,14 @@ const openTutorial = async () => {
                   :placeholder="i18n.nearbyWhitelistPlc"
                 />
               </div>
+              <div class="form-section">
+                <label class="form-label" style="text-transform:none;letter-spacing:0;">{{ i18n.noTranslateLabel }}</label>
+                <textarea class="form-input"
+                  style="resize:vertical;min-height:55px;font-size:12px;line-height:1.5;"
+                  v-model="noTranslateRaw"
+                  :placeholder="i18n.noTranslatePlc"
+                />
+              </div>
               <div class="form-section" style="margin-bottom:0">
                 <label class="form-label">{{ i18n.keywordBlocklistLabel }}</label>
                 <textarea class="form-input"
@@ -1533,6 +1595,7 @@ const openTutorial = async () => {
           <div class="message-meta">
             <span class="msg-sender">{{ msg.sender }}</span>
             <span class="msg-time">{{ msg.time }}</span>
+            <span v-if="msg.sender !== 'System' && !isMySelf(msg.sender) && isNoTranslate(msg.sender)" class="msg-tag">{{ i18n.noTranslateTag }}</span>
           </div>
           <div class="message-bubble group">
             <div class="source-text">{{ msg.text }}</div>
@@ -1557,6 +1620,14 @@ const openTutorial = async () => {
                   :class="{ 'loading': aiReplyMap[getAiReplyKey(activeChatTabId, msg)]?.loading }"
                 >
                   <Sparkles :size="11" />
+                </button>
+                <button
+                  class="bubble-action-btn"
+                  :title="isNoTranslate(msg.sender) ? i18n.noTranslateRemove : i18n.noTranslateAdd"
+                  @click="toggleNoTranslate(msg.sender)"
+                >
+                  <UserCheck v-if="isNoTranslate(msg.sender)" :size="11" />
+                  <UserX v-else :size="11" />
                 </button>
               </template>
             </div>

@@ -736,3 +736,9 @@ html, body, #app {
 }
 /* 窗口太窄时让位给语气/语言选择 */
 @media (max-width: 420px) { .enter-hint { display: none; } }
+
+.msg-tag {
+  font-size: 10px; color: var(--text-muted);
+  border: 1px solid rgba(255,255,255,.12); border-radius: 3px;
+  padding: 0 4px; line-height: 14px;
+}
