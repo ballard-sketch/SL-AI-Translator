@@ -1,6 +1,6 @@
 [package]
 name = "ai-sltalk"
-version = "1.0.13"
+version = "1.0.14"
 description = "AI-powered immersive chat translation assistant for Second Life"
 authors = ["you"]
 edition = "2021"
