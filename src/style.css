@@ -728,3 +728,11 @@ html, body, #app {
   padding: 10px 12px 6px;
   background: rgba(0,0,0,0.15);
 }
+
+.enter-hint {
+  margin-left: auto;
+  font-size: 10px; color: var(--text-muted); opacity: .7;
+  white-space: nowrap;
+}
+/* 窗口太窄时让位给语气/语言选择 */
+@media (max-width: 420px) { .enter-hint { display: none; } }

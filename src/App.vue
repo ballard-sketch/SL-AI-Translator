@@ -8,6 +8,7 @@ import { TauriBridge } from './services/TauriBridge';
 import { LLMService, TONES } from './services/LLMService';
 import { UpdateService } from './services/UpdateService';
 import { API_DEFAULTS } from './utils/constants';
+import { looksLikeTarget, resolveLang, LANG_OPTIONS } from './utils/langDetect';
 import {
   Sparkles, Activity, Play, Minus, X,
   Settings, MessageSquareDot, Send, KeyRound,
@@ -22,8 +23,6 @@ const PUBLIC_CHAT_FILES = ['chat.txt', 'conversation.log'];
 // SL 单条聊天消息上限（字节）
 const SL_MSG_BYTE_LIMIT = 1023;
 // 发送方向可选的目标语言，'auto' = 按对方最近消息自动判断
-const SEND_LANGS = ['auto', 'English', 'Simplified Chinese', 'Traditional Chinese', 'Japanese', 'Korean',
-  'Spanish', 'Portuguese', 'French', 'German', 'Italian', 'Russian', 'Turkish', 'Dutch', 'Polish'];
 
 // ── 窗口控制 ──────────────────────────────────────────────────────
 const win = getCurrentWindow();
@@ -120,9 +119,13 @@ const I18N_BUNDLES = {
     // 底部输入栏
     modeTranslate: "翻译", modeAsk: "问 AI",
     composerPlc: "输入你想说的话，回车译成对方语言并复制；Shift+回车换行",
-    askPlc: "问 AI：解释、润色、分析上下文…",
+    askPlc: "问 AI：解释、润色、分析上下文…（Shift+回车换行）",
     toneLabel: "语气", sendLangLabel: "译成",
     langAuto: "自动（跟随对方）",
+    langOther: "其他（手动填写）…",
+    recvLangCustomPlc: "语言名，例如 Swahili / Tiếng Việt",
+    recvLangUnknown: "无法识别这个语言名：消息照常翻译，但已经是该语言的消息也会调用接口。",
+    enterHint: "Enter 发送 · Shift+Enter 换行",
     backLabel: "意思",
     regenerate: "换一种说法",
     thinking: "生成中…",
@@ -188,9 +191,13 @@ const I18N_BUNDLES = {
     secAppearance: "Appearance",
     modeTranslate: "Translate", modeAsk: "Ask AI",
     composerPlc: "Type what you want to say. Enter translates and copies; Shift+Enter for a new line",
-    askPlc: "Ask AI: explain, polish, read the context...",
+    askPlc: "Ask AI: explain, polish, read the context... (Shift+Enter for a new line)",
     toneLabel: "Tone", sendLangLabel: "To",
     langAuto: "Auto (match them)",
+    langOther: "Other (type it)…",
+    recvLangCustomPlc: "Language name, e.g. Swahili / Tiếng Việt",
+    recvLangUnknown: "Language not recognized: messages are still translated, but ones already in this language will also call the API.",
+    enterHint: "Enter to send · Shift+Enter for a new line",
     backLabel: "Means",
     regenerate: "Rephrase",
     thinking: "Generating...",
@@ -423,24 +430,6 @@ const getOtherRawMessages = (tab) => {
     .map(m => m.text);
 };
 
-// 对方消息已经是目标语言（或只有表情/数字）时跳过翻译，省 token
-const HAN_RE = /\p{Script=Han}/gu;
-const KANA_RE = /[\p{Script=Hiragana}\p{Script=Katakana}]/gu;
-const HANGUL_RE = /\p{Script=Hangul}/gu;
-const LETTER_RE = /\p{L}/gu;
-const looksLikeTarget = (text, lang) => {
-  const letters = (text.match(LETTER_RE) || []).length;
-  if (letters === 0) return true;
-  const han = (text.match(HAN_RE) || []).length;
-  const kana = (text.match(KANA_RE) || []).length;
-  const hangul = (text.match(HANGUL_RE) || []).length;
-  const l = (lang || '').toLowerCase();
-  if (l.includes('chinese') || l.includes('中文')) return kana === 0 && han / letters >= 0.6;
-  if (l.includes('japanese')) return kana > 0 && (han + kana) / letters >= 0.6;
-  if (l.includes('korean')) return hangul / letters >= 0.6;
-  return false;
-};
-
 const chatScrollRef = ref(null);
 
 // ── 黑名单管理 ───────────────────────────────────────────────
@@ -461,6 +450,20 @@ const glossaryRaw = computed({
   get: () => settings.value.glossary.join('\n'),
   set: (v) => { settings.value.glossary = v.split('\n'); }
 });
+
+// 接收语言：常用语言下拉选择，列表外的可手动填写
+const RECV_CUSTOM = '__custom';
+const recvCustomMode = ref(false);
+const recvLangChoice = computed({
+  get: () => (recvCustomMode.value || !LANG_OPTIONS.some(o => o.value === settings.value.recvLang))
+    ? RECV_CUSTOM : settings.value.recvLang,
+  set: (v) => {
+    if (v === RECV_CUSTOM) { recvCustomMode.value = true; return; }
+    recvCustomMode.value = false;
+    settings.value.recvLang = v;
+  }
+});
+const recvLangUnknown = computed(() => !!settings.value.recvLang && !resolveLang(settings.value.recvLang));
 
 // 所有大模型请求共用的配置
 const llmConfig = (extra = {}) => ({
@@ -623,6 +626,8 @@ onMounted(async () => {
     }
   }
 
+  settingsLoaded = true;
+
   // 启动时应用已保存的界面语言
   await applyUiLang();
   await applyHotkey();
@@ -746,7 +751,9 @@ onMounted(async () => {
     // 已经是目标语言：不调用接口
     if (looksLikeTarget(text, settings.value.recvLang)) return;
 
-    await translateMessage(tabInfo, reactiveItem);
+    const res = await translateMessage(tabInfo, reactiveItem);
+    // 被取消（例如切换了账号）：不再写历史和存档
+    if (res.aborted) return;
 
     // 翻译完成后若用户仍在底部则跟随滚动
     if (activeChatTabId.value === source) scrollToBottom(true, false);
@@ -820,6 +827,15 @@ const saveSettings = () => {
   }
 };
 
+// 设置改动后自动保存（防抖），不再依赖手动点"保存"
+let settingsLoaded = false;
+let autoSaveTimer = null;
+watch(settings, () => {
+  if (!settingsLoaded) return;
+  clearTimeout(autoSaveTimer);
+  autoSaveTimer = setTimeout(saveSettings, 400);
+}, { deep: true });
+
 // 切换账号时加载该账号的专属设置
 const loadAccountSettings = () => {
   if (!settings.value.account) return;
@@ -841,6 +857,40 @@ const loadAccountSettings = () => {
       settings.value.glossary         = [];
     }
   } catch (_) {}
+};
+
+const defaultChatTabs = () => [
+  { id: 'chat.txt', title: 'nearby', messages: [], hasUnread: false }
+];
+
+// 切换账号：换账号级设置、换聊天记录，正在监听时改为监听新账号的目录
+const onAccountChange = async () => {
+  clearTimeout(autoSaveTimer);
+  loadAccountSettings();
+  saveSettings();
+
+  // 旧账号的请求作废，避免结果写进新账号的界面
+  inflight.forEach(c => c.abort());
+  aiReplyMap.value = {};
+  closeComposer();
+  closeAiChat();
+
+  let tabs = defaultChatTabs();
+  try {
+    const saved = await invoke('load_ui_state', { account: settings.value.account || '' });
+    if (saved) tabs = JSON.parse(saved);
+  } catch (_) {}
+  chatTabs.value = tabs;
+  tabRenderLimits.value = {};
+  if (!chatTabs.value.some(t => t.id === activeChatTabId.value && !t.hidden)) {
+    activeChatTabId.value = chatTabs.value[0]?.id || 'chat.txt';
+  }
+
+  if (isListening.value) {
+    try { await TauriBridge.stopLogWatcher(); } catch (e) { console.error(e); }
+    isListening.value = false;
+    await toggleListening();
+  }
 };
 
 const browseLogDir = async () => {
@@ -1033,6 +1083,13 @@ const submitComposer = () => {
   composerInput.value = '';
   if (composerMode.value === 'translate') runTranslate(text);
   else runAsk(text);
+};
+
+// 输入法组字时的回车是确认候选/字母，不是发送
+const onComposerEnter = (e) => {
+  if (e.isComposing || e.keyCode === 229) return;
+  e.preventDefault();
+  submitComposer();
 };
 
 const regenerate = () => {
@@ -1240,7 +1297,7 @@ const openTutorial = async () => {
                 <label class="form-label"><User :size="13" /> {{ i18n.slAccount }}</label>
                 <div class="input-row">
                   <div class="select-wrap" style="flex:1">
-                    <select v-model="settings.account" class="form-select" @change="loadAccountSettings">
+                    <select v-model="settings.account" class="form-select" @change="onAccountChange">
                       <option value="" disabled>{{ i18n.slAccountDropTip }}</option>
                       <option v-for="acc in accountList" :key="acc" :value="acc">{{ acc }}</option>
                     </select>
@@ -1294,7 +1351,16 @@ const openTutorial = async () => {
             <div v-show="openSections.has('translate')" class="acc-body">
               <div class="form-section">
                 <label class="form-label">{{ i18n.recvLangConfig }}</label>
-                <input v-model="settings.recvLang" class="form-input" placeholder="Simplified Chinese / English / etc..." />
+                <div class="select-wrap">
+                  <select v-model="recvLangChoice" class="form-select">
+                    <option v-for="o in LANG_OPTIONS" :key="o.value" :value="o.value">{{ o.label }}</option>
+                    <option :value="RECV_CUSTOM">{{ i18n.langOther }}</option>
+                  </select>
+                  <ChevronDown :size="14" class="select-chevron" />
+                </div>
+                <input v-if="recvLangChoice === RECV_CUSTOM" v-model.trim="settings.recvLang" class="form-input"
+                  style="margin-top:6px" :placeholder="i18n.recvLangCustomPlc" />
+                <div v-if="recvLangChoice === RECV_CUSTOM && recvLangUnknown" class="form-hint" style="color:#fbbf24;">{{ i18n.recvLangUnknown }}</div>
               </div>
               <div class="form-section">
                 <label class="form-label">{{ i18n.ctxCountSetting }}</label>
@@ -1584,10 +1650,12 @@ const openTutorial = async () => {
               <label class="mini-select">
                 <span>{{ i18n.sendLangLabel }}</span>
                 <select v-model="activeSendLang">
-                  <option v-for="l in SEND_LANGS" :key="l" :value="l">{{ l === 'auto' ? i18n.langAuto : l }}</option>
+                  <option value="auto">{{ i18n.langAuto }}</option>
+                  <option v-for="o in LANG_OPTIONS" :key="o.value" :value="o.value">{{ o.label }}</option>
                 </select>
               </label>
             </template>
+            <span class="enter-hint">{{ i18n.enterHint }}</span>
           </div>
           <!-- 输入行 -->
           <div class="ai-chat-input-row">
@@ -1597,9 +1665,10 @@ const openTutorial = async () => {
               v-model="composerInput"
               :placeholder="composerMode === 'translate' ? i18n.composerPlc : i18n.askPlc"
               rows="1"
-              @keydown.enter.exact.prevent="submitComposer"
+              :title="i18n.enterHint"
+              @keydown.enter.exact="onComposerEnter"
             />
-            <button class="btn-send-inline" @click="submitComposer">
+            <button class="btn-send-inline" :title="i18n.enterHint" @click="submitComposer">
               <Send :size="14" />
             </button>
           </div>

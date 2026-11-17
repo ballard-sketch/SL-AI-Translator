@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -11,6 +11,9 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter};
 
 static IS_WATCHING: AtomicBool = AtomicBool::new(false);
+/// 每次启动/停止都会加一；监听线程发现代数变了就退出。
+/// 防止"停止后马上重新开始"时旧线程还没来得及退出，又看到 IS_WATCHING=true 而继续跑
+static GENERATION: AtomicU64 = AtomicU64::new(0);
 
 /// 最后一条消息在这段时间内没有续行写入，才认为它已经完整
 const PENDING_FLUSH_AFTER: Duration = Duration::from_millis(400);
@@ -46,6 +49,9 @@ impl LogWatcherService {
             return Ok(());
         }
 
+        let my_gen = GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
+        let is_current = move || GENERATION.load(Ordering::SeqCst) == my_gen;
+
         // 启动前先把所有现存文件的 offset 设到末尾，避免重复读历史消息
         let mut states = Self::init_states(&target_dir);
 
@@ -60,24 +66,31 @@ impl LogWatcherService {
                 Ok(w) => w,
                 Err(e) => {
                     eprintln!("初始化 watcher 失败: {}", e);
-                    IS_WATCHING.store(false, Ordering::SeqCst);
+                    if is_current() {
+                        IS_WATCHING.store(false, Ordering::SeqCst);
+                    }
                     return;
                 }
             };
 
             if let Err(e) = watcher.watch(&target_dir, RecursiveMode::NonRecursive) {
                 eprintln!("监听目录失败: {}", e);
-                IS_WATCHING.store(false, Ordering::SeqCst);
+                if is_current() {
+                    IS_WATCHING.store(false, Ordering::SeqCst);
+                }
                 return;
             }
 
             loop {
-                if !IS_WATCHING.load(Ordering::SeqCst) {
+                if !is_current() || !IS_WATCHING.load(Ordering::SeqCst) {
                     break;
                 }
 
                 match rx.recv_timeout(Duration::from_millis(200)) {
                     Ok(Ok(event)) => {
+                        if !is_current() {
+                            break;
+                        }
                         for path in event.paths {
                             if Self::is_log_file(&path) {
                                 let state = states.entry(path.clone()).or_default();
@@ -99,6 +112,7 @@ impl LogWatcherService {
 
     /// 停止监听
     pub fn stop_watching() {
+        GENERATION.fetch_add(1, Ordering::SeqCst);
         IS_WATCHING.store(false, Ordering::SeqCst);
     }
 
