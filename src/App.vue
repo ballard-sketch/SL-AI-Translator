@@ -6,9 +6,11 @@ import { openUrl } from '@tauri-apps/plugin-opener';
 import { saveWindowState, restoreStateCurrent } from '@tauri-apps/plugin-window-state';
 import { TauriBridge } from './services/TauriBridge';
 import { LLMService, TONES } from './services/LLMService';
-import { UpdateService } from './services/UpdateService';
+import { UpdateService, REPO_URL } from './services/UpdateService';
 import { API_DEFAULTS } from './utils/constants';
 import { looksLikeTarget, resolveLang, LANG_OPTIONS } from './utils/langDetect';
+import { isCommonPhrase, DEFAULT_COMMON_PHRASES } from './utils/commonPhrases';
+import { isSystemNotice } from './utils/systemNotice';
 import {
   Sparkles, Activity, Play, Minus, X,
   Settings, MessageSquareDot, Send, KeyRound,
@@ -64,6 +66,8 @@ const settings = ref({
   nearbyWhitelist: [],           // 白名单用户名数组（附近频道）
   keywordBlocklist: [],          // 关键词屏蔽数组（含此词不翻译）
   noTranslate: [],               // 不用翻译的人：消息照常显示，但不自动调接口
+  commonPhrases: [...DEFAULT_COMMON_PHRASES], // 常用语：整条消息只有这些时不翻译
+  skipSystemNotice: true,        // 上线/下线、进入/离开区域等客户端通知不翻译
   sendTone: 'natural',           // 新频道默认语气
   backTranslate: true,           // 发送翻译时附带回译
   glossary: [],                  // 术语表：每行 "词" 或 "A = B"
@@ -118,6 +122,10 @@ const I18N_BUNDLES = {
     noTranslateAdd: "不再自动翻译此人",
     noTranslateRemove: "恢复自动翻译此人",
     noTranslateTag: "不翻译",
+    commonPhrasesLabel: "常用语不翻译（整条消息只由这些词组成时跳过，如 hi / ty / lol / ok bye）",
+    commonPhrasesPlc: "每行一个词或短语",
+    commonPhrasesReset: "恢复默认",
+    skipSystemNoticeCb: "系统通知不翻译（xxx is online / is offline、进入/离开区域、正在输入等）",
     keywordBlocklistPlc: "每行一个关键词，例如：\nis offline\n離開該區域",
     secTranslation: "翻译参数",
     secFilter: "过滤规则",
@@ -196,6 +204,10 @@ const I18N_BUNDLES = {
     noTranslateAdd: "Stop auto-translating this person",
     noTranslateRemove: "Auto-translate this person again",
     noTranslateTag: "no translation",
+    commonPhrasesLabel: "Common phrases (skip when a message is made only of these, e.g. hi / ty / lol / ok bye)",
+    commonPhrasesPlc: "One word or phrase per line",
+    commonPhrasesReset: "Restore defaults",
+    skipSystemNoticeCb: "Skip viewer notices (xxx is online / is offline, entered/left the region, is typing, ...)",
     keywordBlocklistPlc: "One keyword per line, e.g.:\nis offline\n離開該區域",
     secTranslation: "Translation",
     secFilter: "Filters",
@@ -475,6 +487,12 @@ const recvLangChoice = computed({
   }
 });
 const recvLangUnknown = computed(() => !!settings.value.recvLang && !resolveLang(settings.value.recvLang));
+
+const commonPhrasesRaw = computed({
+  get: () => settings.value.commonPhrases.join('\n'),
+  set: (v) => { settings.value.commonPhrases = v.split('\n'); }
+});
+const resetCommonPhrases = () => { settings.value.commonPhrases = [...DEFAULT_COMMON_PHRASES]; };
 
 const noTranslateRaw = computed({
   get: () => settings.value.noTranslate.join('\n'),
@@ -799,6 +817,12 @@ onMounted(async () => {
     });
     if (hasBlockedKeyword) return;
 
+    // 客户端生成的通知（xxx is online / offline、进入/离开区域……）：不调接口
+    if (settings.value.skipSystemNotice && isSystemNotice(sender, text)) return;
+
+    // 整条消息只是寒暄/应答/笑（hi、ty、lol、ok bye……）：不调接口
+    if (isCommonPhrase(text, settings.value.commonPhrases)) return;
+
     // 已经是目标语言：不调用接口
     if (looksLikeTarget(text, settings.value.recvLang)) return;
 
@@ -858,7 +882,7 @@ const GLOBAL_SETTINGS_KEY = 'sl-translator-global';
 // 账号级设置键（黑名单、接收语言等随账号变化）
 const accountSettingsKey = (account) => `sl-settings-${account}`;
 // 全局字段清单
-const GLOBAL_FIELDS = ['logDir', 'account', 'apiKey', 'baseUrl', 'model', 'uiLang', 'contextCount', 'translateGroup', 'viewerType', 'bgOpacity', 'nearbyWhitelistEnabled', 'sendTone', 'backTranslate', 'hotkey'];
+const GLOBAL_FIELDS = ['logDir', 'account', 'apiKey', 'baseUrl', 'model', 'uiLang', 'contextCount', 'translateGroup', 'viewerType', 'bgOpacity', 'nearbyWhitelistEnabled', 'sendTone', 'backTranslate', 'hotkey', 'commonPhrases', 'skipSystemNotice'];
 
 const saveSettings = () => {
   const global = {};
@@ -1238,7 +1262,7 @@ const openHistoryFolder = async () => {
 
 const openTutorial = async () => {
   try {
-    await openUrl('https://github.com/yarnbyte/AI-SecondLife-Talk/blob/main/README.md');
+    await openUrl(`${REPO_URL}/blob/main/README.md`);
   } catch (e) {
     console.error('打开教程链接失败:', e);
   }
@@ -1473,11 +1497,28 @@ const openTutorial = async () => {
                 />
               </div>
               <div class="form-section">
+                <label class="form-label" style="text-transform:none;letter-spacing:0;font-weight:500;">
+                  <input type="checkbox" v-model="settings.skipSystemNotice" style="vertical-align:middle;margin-right:5px;" />
+                  {{ i18n.skipSystemNoticeCb }}
+                </label>
+              </div>
+              <div class="form-section">
                 <label class="form-label" style="text-transform:none;letter-spacing:0;">{{ i18n.noTranslateLabel }}</label>
                 <textarea class="form-input"
                   style="resize:vertical;min-height:55px;font-size:12px;line-height:1.5;"
                   v-model="noTranslateRaw"
                   :placeholder="i18n.noTranslatePlc"
+                />
+              </div>
+              <div class="form-section">
+                <label class="form-label" style="text-transform:none;letter-spacing:0;display:flex;align-items:center;gap:6px;">
+                  <span style="flex:1;">{{ i18n.commonPhrasesLabel }}</span>
+                  <button class="btn-browse" style="padding:2px 8px;font-size:11px;" @click="resetCommonPhrases">{{ i18n.commonPhrasesReset }}</button>
+                </label>
+                <textarea class="form-input"
+                  style="resize:vertical;min-height:80px;font-size:12px;line-height:1.5;"
+                  v-model="commonPhrasesRaw"
+                  :placeholder="i18n.commonPhrasesPlc"
                 />
               </div>
               <div class="form-section" style="margin-bottom:0">

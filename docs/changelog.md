@@ -1,4 +1,15 @@
 
+## [Unreleased]
+
+### 新增
+- 常用语不翻译：整条消息只由寒暄、应答、笑之类的常用语组成时（如 hi、ty、lol、ok bye、hahaha、good night）不调用接口。内置一份默认名单，可在"过滤规则"里增删或恢复默认；只看整条消息，"lol where are you from?" 这类仍会翻译
+- 系统通知不翻译（默认开启）：客户端生成的 xxx is online / is offline、进入/离开区域或聊天范围、正在输入等通知不再调用接口，支持英、中、日、德、法、西、葡客户端；名字以代词开头的正常句子（如 my boyfriend is offline）仍会翻译
+
+### 变更
+- 检查更新、教程链接改为新仓库 ballard-sketch/SL-AI-Translator；新仓库暂无 Gitee 镜像，Gitee 检查先关闭
+
+---
+
 ## [v1.0.13] - 2026-11-17
 
 ### 新增

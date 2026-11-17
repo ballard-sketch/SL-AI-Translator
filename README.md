@@ -6,7 +6,7 @@
 >
 > An automated, AI-powered real-time translation assistant for **Second Life**, fully compatible with both the **Official Viewer** and **Firestorm Viewer**.
 
-*[Click here for English documentation](https://github.com/yarnbyte/AI-SecondLife-Talk?tab=readme-ov-file#features-english)*
+*[Click here for English documentation](https://github.com/ballard-sketch/SL-AI-Translator?tab=readme-ov-file#features-english)*
 
 ---
 

@@ -1,9 +1,15 @@
 import { getVersion } from '@tauri-apps/api/app';
 import { openUrl } from '@tauri-apps/plugin-opener';
 
-// Gitee is used as a mirror/fallback for users with poor GitHub connectivity
-const GITHUB_API = 'https://api.github.com/repos/yarnbyte/AI-SecondLife-Talk/releases/latest';
-const GITEE_API = 'https://gitee.com/api/v5/repos/yarnbyte/AI-SecondLife-Talk/tags';
+// 发布仓库。GitHub 仓库必须是公开的，否则匿名请求拿不到 Release（返回 404），用户也下载不了
+export const GITHUB_REPO = 'ballard-sketch/SL-AI-Translator';
+// Gitee 镜像（给访问 GitHub 慢的用户）。新仓库还没有 Gitee 镜像，留空 = 不查；
+// 建好镜像并同步标签后填 'owner/repo' 即可
+const GITEE_REPO = '';
+
+export const REPO_URL = `https://github.com/${GITHUB_REPO}`;
+const GITHUB_API = `https://api.github.com/repos/${GITHUB_REPO}/releases/latest`;
+const GITEE_API = GITEE_REPO ? `https://gitee.com/api/v5/repos/${GITEE_REPO}/tags` : '';
 
 export class UpdateService {
   /**
@@ -26,7 +32,7 @@ export class UpdateService {
           return res.json().then(data => ({ ...data, source: 'github' }));
         });
         
-        const fetchGitee = fetch(GITEE_API, { signal: controller.signal }).then(res => {
+        const fetchGitee = !GITEE_API ? Promise.reject(new Error('Gitee disabled')) : fetch(GITEE_API, { signal: controller.signal }).then(res => {
           if (!res.ok) throw new Error('Gitee HTTP ' + res.status);
           return res.json().then(data => {
             if (Array.isArray(data) && data.length > 0) {
@@ -57,8 +63,8 @@ export class UpdateService {
            source: releaseInfo.source,
            // Redirect to the web page containing the releases
            url: releaseInfo.source === 'gitee' 
-             ? `https://gitee.com/yarnbyte/AI-SecondLife-Talk/releases/tag/${releaseInfo.tag_name}`
-             : 'https://github.com/yarnbyte/AI-SecondLife-Talk/releases/latest'
+             ? `https://gitee.com/${GITEE_REPO}/releases/tag/${releaseInfo.tag_name}`
+             : `${REPO_URL}/releases/latest`
          };
       }
       return { hasUpdate: false, currentVersion };
