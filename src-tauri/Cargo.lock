@@ -19,7 +19,7 @@ dependencies = [
 
 [[package]]
 name = "ai-sltalk"
-version = "1.0.12"
+version = "1.0.13"
 dependencies = [
  "notify",
  "serde",
